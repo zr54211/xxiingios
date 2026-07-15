@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ЧЕРНОВИК: перед первой сборкой сверить схему с templateMobile
+  из официального комплекта «Технология внешних компонент» (статья ИТС metod8dev №3221).
+-->
+<bundle xmlns="http://v8.1c.ru/8.2/addin/bundle" name="BarcodeScannerZXing">
+    <component os="Android" arch="arm64"  path="Android/arm64-v8a/libBarcodeScannerZXing.so"   type="native"/>
+    <component os="Android" arch="arm"    path="Android/armeabi-v7a/libBarcodeScannerZXing.so" type="native"/>
+    <component os="Android" arch="x86_64" path="Android/x86_64/libBarcodeScannerZXing.so"      type="native"/>
+    <component os="iOS"     arch="arm64"  path="iOS/libBarcodeScannerZXing.a"                  type="native"/>
+</bundle>
