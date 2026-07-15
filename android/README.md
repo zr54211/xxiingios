@@ -15,13 +15,13 @@
 ```
 cmake -B build-android-arm64 ^
   -DCMAKE_TOOLCHAIN_FILE=%ANDROID_NDK%/build/cmake/android.toolchain.cmake ^
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 ^
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 ^
   -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build-android-arm64
 ```
 
-TODO: уточнить минимальный API level по системным требованиям мобильной
-платформы 8.3.27 (ориентир — android-24, проверить).
+API level android-21 — по факту Android-проекта мобильной платформы 8.3.27
+(prjandroid: minSdkVersion=21, targetSdkVersion=35). CameraX требует 21+ — совместимо.
 
 ## Риск
 
