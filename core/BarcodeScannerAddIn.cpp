@@ -5,6 +5,10 @@
 #include "Decoder.h"
 #include "StringUtils.h"
 
+#if defined(__ANDROID__)
+#include "AndroidScanner.h"
+#endif
+
 namespace {
 
 constexpr char16_t kExtensionName[] = u"BarcodeScannerZXing";
@@ -209,13 +213,25 @@ bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* /
 {
 	switch (methodNum) {
 	case eMethStartScanning:
-		// Этап 2 (Android) / этап 3 (iOS): запуск экрана сканера платформенным слоем.
-		PostError(u"НачатьСканирование: экран сканера ещё не реализован (этап 2)");
+#if defined(__ANDROID__)
+		// Этап 2, проба UI: оверлей поверх Activity 1С вместо экрана сканера.
+		if (bsz::android::ShowOverlayProbe(m_connect))
+			return true;
+
+		PostError(u"НачатьСканирование: не удалось показать оверлей (см. logcat BarcodeScannerZXing)");
 		return false;
+#else
+		PostError(u"НачатьСканирование: экран сканера ещё не реализован для этой ОС");
+		return false;
+#endif
 
 	case eMethStopScanning:
-		PostError(u"ЗавершитьСканирование: экран сканера ещё не реализован (этап 2)");
+#if defined(__ANDROID__)
+		return bsz::android::HideOverlayProbe();
+#else
+		PostError(u"ЗавершитьСканирование: экран сканера ещё не реализован для этой ОС");
 		return false;
+#endif
 
 	default:
 		return false;

@@ -30,7 +30,11 @@ $items = @(
 $missing = @()
 foreach ($item in $items) {
     $srcPath = Join-Path $root $item.src
-    if (Test-Path $srcPath) {
+    # Предпочитаем stripped-вариант (llvm-strip), если он подготовлен рядом.
+    $stripped = $srcPath -replace '\.(so|a)$', '.stripped.$1'
+    if (Test-Path $stripped) {
+        Copy-Item $stripped (Join-Path (Join-Path $staging $item.dst) (Split-Path $item.src -Leaf))
+    } elseif (Test-Path $srcPath) {
         Copy-Item $srcPath (Join-Path $staging $item.dst)
     } else {
         $missing += $item.src

@@ -2,6 +2,14 @@
 
 #include "BarcodeScannerAddIn.h"
 
+// Сборка идёт с visibility=hidden; точки входа Native API должны остаться
+// видимыми (на Windows это делает exports.def).
+#if defined(_WIN32)
+#define BSZ_EXPORT
+#else
+#define BSZ_EXPORT __attribute__((visibility("default")))
+#endif
+
 namespace {
 
 constexpr WCHAR_T kClassNames[] = {
@@ -11,12 +19,12 @@ constexpr WCHAR_T kClassNames[] = {
 
 } // namespace
 
-extern "C" const WCHAR_T* GetClassNames()
+extern "C" BSZ_EXPORT const WCHAR_T* GetClassNames()
 {
 	return kClassNames;
 }
 
-extern "C" long GetClassObject(const WCHAR_T* /*className*/, IComponentBase** pIntf)
+extern "C" BSZ_EXPORT long GetClassObject(const WCHAR_T* /*className*/, IComponentBase** pIntf)
 {
 	// Компонента экспортирует единственный класс — имя не анализируем.
 	if (!pIntf || *pIntf)
@@ -26,7 +34,7 @@ extern "C" long GetClassObject(const WCHAR_T* /*className*/, IComponentBase** pI
 	return 1;
 }
 
-extern "C" long DestroyObject(IComponentBase** pIntf)
+extern "C" BSZ_EXPORT long DestroyObject(IComponentBase** pIntf)
 {
 	if (!pIntf || !*pIntf)
 		return -1;
@@ -36,7 +44,7 @@ extern "C" long DestroyObject(IComponentBase** pIntf)
 	return 0;
 }
 
-extern "C" AppCapabilities SetPlatformCapabilities(const AppCapabilities /*capabilities*/)
+extern "C" BSZ_EXPORT AppCapabilities SetPlatformCapabilities(const AppCapabilities /*capabilities*/)
 {
 	return eAppCapabilitiesLast;
 }

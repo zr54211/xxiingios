@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # zxing-cpp: только чтение штрихкодов, без примеров и writer'ов.
+# Статически внутрь нашего бинарника — в zip ВК едет один self-contained .so.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(ZXING_READERS ON CACHE BOOL "" FORCE)
 set(ZXING_WRITERS OFF CACHE STRING "" FORCE)
 set(ZXING_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -48,6 +50,9 @@ if(WIN32)
 endif()
 
 if(ANDROID)
-    # JNI-слой камеры (android/) подключится на этапе 2.
+    target_sources(${PROJECT_NAME} PRIVATE
+        android/AndroidScanner.cpp
+        android/AndroidScanner.h)
+    target_include_directories(${PROJECT_NAME} PRIVATE android)
     target_link_libraries(${PROJECT_NAME} PRIVATE log)
 endif()

@@ -1,16 +1,36 @@
 # Android-слой (этап 2)
 
-Здесь появится платформенная часть для Android:
+## Архитектура
 
-- **ScannerActivity** (Kotlin/Java): полноэкранный сканер — CameraX (`Preview` +
-  `ImageAnalysis` 1080p+), continuous autofocus, tap-to-focus, зум, фонарик.
-  Кадры (Y-плоскость `ImageProxy`) передаются в `bsz::DecodeLuminance`.
-- **JNI-мост**: получение Activity приложения 1С через
-  `IAndroidComponentHelper::GetActivity()` (см. `vendor/1c-native-api/include/IAndroidComponentHelper.h`),
-  запуск ScannerActivity, обратный вызов с результатом →
-  `BarcodeScannerAddIn::EmitScanResult()`.
+Ключевое ограничение: приложение собирает сборщик 1С, поэтому мы **не можем**
+добавлять Java/androidx-зависимости (CameraX) или объявлять свои Activity в
+AndroidManifest. Всё живёт внутри нашего `.so`:
 
-## Сборка (после появления кода)
+- **Камера — NDK Camera2 API** (`libcamera2ndk` + `libmediandk`, API 24+):
+  открытие камеры, capture session, `AImageReader` (YUV_420_888, 1080p+),
+  continuous autofocus, tap-to-focus, зум, фонарик — целиком из C++.
+  Y-плоскость кадра → `bsz::DecodeLuminance` → `EmitScanResult`.
+- **Экран сканера — не Activity, а полноэкранный View** поверх текущей
+  Activity приложения 1С: `IAndroidComponentHelper::GetActivity()` → JNI →
+  `runOnUiThread` → `addContentView` (SurfaceView для preview + кнопки).
+  Закрытие — удаление View. Регистрация в манифесте не требуется.
+- Разрешение CAMERA: должно быть у приложения (сборщик 1С добавляет его при
+  использовании мультимедиа; у Мобильной кассы уже есть). Проверка/запрос
+  runtime-разрешения — через JNI (`checkSelfPermission`/`requestPermissions`).
+
+Сборка с `ANDROID_PLATFORM=android-21` (как у платформы 8.3.27, prjandroid:
+minSdkVersion=21), а `libcamera2ndk` подгружается через `dlopen` в рантайме:
+на устройствах ниже Android 7.0 (API 24) компонента подключится, но
+`НачатьСканирование` вернёт понятную ошибку; режим B работает везде.
+
+## Порядок работ
+
+1. Проба UI: пустой полноэкранный View через GetActivity/addContentView,
+   открыть/закрыть из BSL (валидация риска «UI из ВК»).
+2. Camera2: preview + поток кадров в декодер.
+3. Эргономика: рамка, фонарик, tap-to-focus, зум, вибро при успехе.
+
+## Сборка
 
 ```
 cmake -B build-android-arm64 ^
@@ -20,12 +40,4 @@ cmake -B build-android-arm64 ^
 cmake --build build-android-arm64
 ```
 
-API level android-21 — по факту Android-проекта мобильной платформы 8.3.27
-(prjandroid: minSdkVersion=21, targetSdkVersion=35). CameraX требует 21+ — совместимо.
-
-## Риск
-
-Формально документация 1С запрещает UI в мобильных ВК, но платформа сама
-предоставляет `GetActivity()`; запуск своей Activity — обкатанный сообществом
-приём. Первым делом на этом этапе собирается минимальная проба: пустая Activity
-открывается и закрывается из тестового мобильного приложения.
+NDK: r27 LTS (устанавливается в `%LOCALAPPDATA%\Android\Sdk\ndk\27.3.13750724`).
