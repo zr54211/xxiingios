@@ -44,6 +44,32 @@ ANativeWindow* g_previewWindow = nullptr; // живёт между onSurface(cre
 std::mutex g_ownerMutex;
 BarcodeScannerAddIn* g_owner = nullptr;
 
+// Настройки текущего сеанса сканирования (из НастройкиJSON).
+bool g_autoClose = true;
+bool g_torchOnStart = false;
+
+// Примитивный разбор булева поля плоского JSON настроек.
+bool JsonFlag(const std::string& json, const char* key, bool defaultValue)
+{
+	const std::string needle = std::string("\"") + key + "\"";
+	const size_t keyPos = json.find(needle);
+
+	if (keyPos == std::string::npos)
+		return defaultValue;
+
+	const size_t colon = json.find(':', keyPos + needle.size());
+
+	if (colon == std::string::npos)
+		return defaultValue;
+
+	const size_t value = json.find_first_not_of(" \t\r\n", colon + 1);
+
+	if (value == std::string::npos)
+		return defaultValue;
+
+	return json.compare(value, 4, "true") == 0;
+}
+
 // Задача, исполняемая в UI-потоке через UiBridge.post -> runOnUiThread -> nativeRun.
 struct UiTask {
 	std::function<void()> fn;
@@ -118,17 +144,47 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 	const bool started = bsz::android::CameraStart(g_previewWindow, kFrameWidth, kFrameHeight,
 		[](const std::string& json) {
 
-			std::lock_guard<std::mutex> lock(g_ownerMutex);
+			{
+				std::lock_guard<std::mutex> lock(g_ownerMutex);
 
-			if (g_owner)
-				g_owner->EmitScanResult(json);
+				if (g_owner)
+					g_owner->EmitScanResult(json);
+
+			}
+
+			if (g_autoClose)
+				bsz::android::StopScanning();
 
 		});
 
 	if (!started) {
 		ANativeWindow_release(g_previewWindow);
 		g_previewWindow = nullptr;
+		return;
 	}
+
+	if (g_torchOnStart)
+		bsz::android::CameraSetTorch(true);
+}
+
+// Тап по превью (UI-поток): фокусировка в точке.
+void JNICALL NativeOnTap(JNIEnv* /*env*/, jclass /*cls*/, jfloat nx, jfloat ny)
+{
+	bsz::android::CameraFocusAt(nx, ny);
+}
+
+// Кнопка закрытия на оверлее (UI-поток).
+void JNICALL NativeOnClose(JNIEnv* /*env*/, jclass /*cls*/)
+{
+	{
+		std::lock_guard<std::mutex> lock(g_ownerMutex);
+
+		if (g_owner)
+			g_owner->EmitEvent(u"ScanCancelled", "");
+
+	}
+
+	bsz::android::StopScanning();
 }
 
 jclass FindComponentClass(JNIEnv* env, IAndroidComponentHelper* helper, const char16_t* name)
@@ -160,10 +216,12 @@ bool EnsureJavaPart(JNIEnv* env, IAndroidComponentHelper* helper)
 	};
 	static const JNINativeMethod overlayMethods[] = {
 		{"onSurface", "(Landroid/view/Surface;)V", reinterpret_cast<void*>(&NativeOnSurface)},
+		{"onTap", "(FF)V", reinterpret_cast<void*>(&NativeOnTap)},
+		{"onClose", "()V", reinterpret_cast<void*>(&NativeOnClose)},
 	};
 
 	if (env->RegisterNatives(bridge, bridgeMethods, 1) != JNI_OK
-			|| env->RegisterNatives(overlay, overlayMethods, 1) != JNI_OK
+			|| env->RegisterNatives(overlay, overlayMethods, 3) != JNI_OK
 			|| ClearPendingException(env, "RegisterNatives")) {
 		LOGE("RegisterNatives failed");
 		return false;
@@ -257,7 +315,8 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/)
 
 namespace bsz::android {
 
-StartScanResult StartScanning(IAddInDefBase* connect, BarcodeScannerAddIn* owner)
+StartScanResult StartScanning(IAddInDefBase* connect, BarcodeScannerAddIn* owner,
+	const std::string& settingsJson)
 {
 	if (!EnsureInfra(connect))
 		return StartScanResult::Failed;
@@ -271,6 +330,9 @@ StartScanResult StartScanning(IAddInDefBase* connect, BarcodeScannerAddIn* owner
 		std::lock_guard<std::mutex> lock(g_ownerMutex);
 		g_owner = owner;
 	}
+
+	g_autoClose = JsonFlag(settingsJson, "autoClose", true);
+	g_torchOnStart = JsonFlag(settingsJson, "torch", false);
 
 	const jboolean granted = env->CallStaticBooleanMethod(g_overlayCls,
 		g_overlayHasPermission, g_activity);
@@ -338,6 +400,11 @@ bool StopScanning()
 		ClearPendingException(uiEnv, "ScannerOverlay.hide");
 
 	});
+}
+
+bool SetTorch(bool on)
+{
+	return CameraSetTorch(on);
 }
 
 } // namespace bsz::android

@@ -14,9 +14,9 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -49,6 +49,7 @@ struct CameraApi {
 	decltype(&ACaptureRequest_free) RequestFree{};
 	decltype(&ACaptureRequest_addTarget) RequestAddTarget{};
 	decltype(&ACaptureRequest_setEntry_u8) RequestSetEntryU8{};
+	decltype(&ACaptureRequest_setEntry_i32) RequestSetEntryI32{};
 	decltype(&ACameraOutputTarget_create) OutputTargetCreate{};
 	decltype(&ACameraOutputTarget_free) OutputTargetFree{};
 	decltype(&ACaptureSessionOutput_create) SessionOutputCreate{};
@@ -116,6 +117,7 @@ struct CameraApi {
 			&& Sym(cam, "ACaptureRequest_free", RequestFree)
 			&& Sym(cam, "ACaptureRequest_addTarget", RequestAddTarget)
 			&& Sym(cam, "ACaptureRequest_setEntry_u8", RequestSetEntryU8)
+			&& Sym(cam, "ACaptureRequest_setEntry_i32", RequestSetEntryI32)
 			&& Sym(cam, "ACameraOutputTarget_create", OutputTargetCreate)
 			&& Sym(cam, "ACameraOutputTarget_free", OutputTargetFree)
 			&& Sym(cam, "ACaptureSessionOutput_create", SessionOutputCreate)
@@ -158,6 +160,14 @@ std::mutex g_mutex;
 CameraState g_cam;
 bsz::android::ScanEmitFn g_emit;
 std::atomic<bool> g_running{false};
+
+// Характеристики выбранной камеры (читаются при старте).
+int32_t g_activeLeft = 0;
+int32_t g_activeTop = 0;
+int32_t g_activeRight = 0;
+int32_t g_activeBottom = 0;
+int32_t g_sensorOrientation = 90;
+bool g_flashAvailable = false;
 
 // Подавление повторной отправки того же результата при непрерывном сканировании.
 std::string g_lastJson;
@@ -286,6 +296,38 @@ bool PickAnalysisSize(const char* cameraId, int targetW, int targetH, int& outW,
 	return bestArea > 0;
 }
 
+// Читает характеристики камеры, нужные для фонарика и tap-to-focus.
+void ReadCameraTraits(const char* cameraId)
+{
+	ACameraMetadata* meta = nullptr;
+
+	if (g_api.GetCharacteristics(g_cam.manager, cameraId, &meta) != ACAMERA_OK)
+		return;
+
+	ACameraMetadata_const_entry entry{};
+
+	if (g_api.MetadataGetConstEntry(meta, ACAMERA_FLASH_INFO_AVAILABLE, &entry) == ACAMERA_OK
+			&& entry.count > 0)
+		g_flashAvailable = entry.data.u8[0] != 0;
+
+	if (g_api.MetadataGetConstEntry(meta, ACAMERA_SENSOR_ORIENTATION, &entry) == ACAMERA_OK
+			&& entry.count > 0)
+		g_sensorOrientation = entry.data.i32[0];
+
+	if (g_api.MetadataGetConstEntry(meta, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &entry) == ACAMERA_OK
+			&& entry.count >= 4) {
+		g_activeLeft = entry.data.i32[0];
+		g_activeTop = entry.data.i32[1];
+		g_activeRight = entry.data.i32[2];
+		g_activeBottom = entry.data.i32[3];
+	}
+
+	g_api.MetadataFree(meta);
+	LOGI("Camera traits: flash=%d, orientation=%d, activeArray=(%d,%d,%d,%d)",
+		g_flashAvailable ? 1 : 0, g_sensorOrientation,
+		g_activeLeft, g_activeTop, g_activeRight, g_activeBottom);
+}
+
 // Выбирает заднюю камеру; при неудаче возвращает пустую строку.
 std::string PickBackCamera()
 {
@@ -409,6 +451,8 @@ bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn
 	if (!PickAnalysisSize(cameraId.c_str(), width, height, analysisW, analysisH))
 		LOGE("PickAnalysisSize failed, falling back to %dx%d", analysisW, analysisH);
 
+	ReadCameraTraits(cameraId.c_str());
+
 	static ACameraDevice_StateCallbacks deviceCallbacks = {
 		nullptr, OnDeviceDisconnected, OnDeviceError};
 
@@ -482,6 +526,96 @@ void CameraStop()
 	TeardownLocked();
 	g_emit = nullptr;
 	LOGI("Camera stopped");
+}
+
+bool CameraSetTorch(bool on)
+{
+	std::lock_guard<std::mutex> lock(g_mutex);
+
+	if (!g_running.load() || !g_cam.request || !g_cam.session)
+		return false;
+
+	if (!g_flashAvailable) {
+		LOGE("SetTorch: flash is not available on this camera");
+		return false;
+	}
+
+	const uint8_t flashMode = on ? ACAMERA_FLASH_MODE_TORCH : ACAMERA_FLASH_MODE_OFF;
+	g_api.RequestSetEntryU8(g_cam.request, ACAMERA_FLASH_MODE, 1, &flashMode);
+
+	if (g_api.SetRepeatingRequest(g_cam.session, nullptr, 1, &g_cam.request, nullptr)
+			!= ACAMERA_OK) {
+		LOGE("SetTorch: setRepeatingRequest failed");
+		return false;
+	}
+
+	LOGI("Torch %s", on ? "on" : "off");
+	return true;
+}
+
+void CameraFocusAt(float nx, float ny)
+{
+	std::lock_guard<std::mutex> lock(g_mutex);
+
+	if (!g_running.load() || !g_cam.request || !g_cam.session)
+		return;
+
+	if (g_activeRight <= g_activeLeft || g_activeBottom <= g_activeTop)
+		return;
+
+	nx = std::min(std::max(nx, 0.0f), 1.0f);
+	ny = std::min(std::max(ny, 0.0f), 1.0f);
+
+	// Превью повёрнуто относительно сенсора: переводим координаты вида
+	// в систему сенсора (для типичной задней камеры ориентация 90).
+	float sx;
+	float sy;
+
+	switch (g_sensorOrientation) {
+	case 90:
+		sx = ny;
+		sy = 1.0f - nx;
+		break;
+	case 270:
+		sx = 1.0f - ny;
+		sy = nx;
+		break;
+	case 180:
+		sx = 1.0f - nx;
+		sy = 1.0f - ny;
+		break;
+	default:
+		sx = nx;
+		sy = ny;
+		break;
+	}
+
+	const int32_t activeW = g_activeRight - g_activeLeft;
+	const int32_t activeH = g_activeBottom - g_activeTop;
+	const int32_t half = std::min(activeW, activeH) / 10;
+	const int32_t cx = g_activeLeft + static_cast<int32_t>(sx * activeW);
+	const int32_t cy = g_activeTop + static_cast<int32_t>(sy * activeH);
+
+	const int32_t region[5] = {
+		std::max(g_activeLeft, cx - half),
+		std::max(g_activeTop, cy - half),
+		std::min(g_activeRight, cx + half),
+		std::min(g_activeBottom, cy + half),
+		1000};
+
+	// Continuous AF/AE на большинстве устройств учитывают регионы без
+	// отдельного триггера; неподдерживаемые регионы только логируем.
+	if (g_api.RequestSetEntryI32(g_cam.request, ACAMERA_CONTROL_AF_REGIONS, 5, region)
+			!= ACAMERA_OK)
+		LOGI("FocusAt: AF regions are not supported");
+
+	g_api.RequestSetEntryI32(g_cam.request, ACAMERA_CONTROL_AE_REGIONS, 5, region);
+
+	if (g_api.SetRepeatingRequest(g_cam.session, nullptr, 1, &g_cam.request, nullptr)
+			!= ACAMERA_OK)
+		LOGE("FocusAt: setRepeatingRequest failed");
+	else
+		LOGI("Focus region set around (%.2f, %.2f)", nx, ny);
 }
 
 } // namespace bsz::android

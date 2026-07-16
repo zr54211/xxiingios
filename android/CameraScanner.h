@@ -23,6 +23,12 @@ bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn
 // Останавливает съёмку и освобождает ресурсы камеры. Безопасно вызывать повторно.
 void CameraStop();
 
+// Фонарик во время сканирования. false — если сканер не запущен или вспышки нет.
+bool CameraSetTorch(bool on);
+
+// Фокусировка в точке превью (нормированные координаты вида 0..1).
+void CameraFocusAt(float nx, float ny);
+
 } // namespace bsz::android
 
 #endif // __ANDROID__

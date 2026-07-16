@@ -22,15 +22,16 @@ constexpr std::array<std::array<const char16_t*, 2>, 1> kPropNames = {{
 	{u"Version", u"Версия"},
 }};
 
-constexpr std::array<std::array<const char16_t*, 2>, 4> kMethodNames = {{
+constexpr std::array<std::array<const char16_t*, 2>, 5> kMethodNames = {{
 	{u"StartScanning", u"НачатьСканирование"},
 	{u"StopScanning",  u"ЗавершитьСканирование"},
 	{u"DecodeFrame",   u"РаспознатьКадр"},
 	{u"DecodeImage",   u"РаспознатьИзображение"},
+	{u"SetTorch",      u"ПереключитьФонарик"},
 }};
 
-constexpr long kMethodParamCount[] = {1, 0, 3, 1};
-constexpr bool kMethodHasRet[]     = {false, false, true, true};
+constexpr long kMethodParamCount[] = {1, 0, 3, 1, 1};
+constexpr bool kMethodHasRet[]     = {false, false, true, true, false};
 
 bool EqualNames(const WCHAR_T* left, const char16_t* right)
 {
@@ -212,12 +213,17 @@ bool ADDIN_API BarcodeScannerAddIn::HasRetVal(const long methodNum)
 	return kMethodHasRet[methodNum];
 }
 
-bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* /*params*/, const long /*paramCount*/)
+bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* params, const long paramCount)
 {
 	switch (methodNum) {
-	case eMethStartScanning:
+	case eMethStartScanning: {
 #if defined(__ANDROID__)
-		switch (bsz::android::StartScanning(m_connect, this)) {
+		std::string settings;
+
+		if (paramCount >= 1 && params && TV_VT(&params[0]) == VTYPE_PWSTR && params[0].pwstrVal)
+			settings = bsz::ToUtf8(params[0].pwstrVal, params[0].wstrLen);
+
+		switch (bsz::android::StartScanning(m_connect, this, settings)) {
 		case bsz::android::StartScanResult::Started:
 			return true;
 
@@ -232,6 +238,25 @@ bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* /
 		}
 #else
 		PostError(u"НачатьСканирование: экран сканера ещё не реализован для этой ОС");
+		return false;
+#endif
+	}
+
+	case eMethSetTorch:
+#if defined(__ANDROID__)
+		if (paramCount < 1 || !params || TV_VT(&params[0]) != VTYPE_BOOL) {
+			PostError(u"ПереключитьФонарик: параметр должен быть булевым");
+			return false;
+		}
+
+		if (!bsz::android::SetTorch(TV_BOOL(&params[0]))) {
+			PostError(u"ПереключитьФонарик: фонарик недоступен или сканер не запущен");
+			return false;
+		}
+
+		return true;
+#else
+		PostError(u"ПереключитьФонарик: не реализовано для этой ОС");
 		return false;
 #endif
 
@@ -294,17 +319,22 @@ void ADDIN_API BarcodeScannerAddIn::SetLocale(const WCHAR_T* /*locale*/)
 {
 }
 
-bool BarcodeScannerAddIn::EmitScanResult(const std::string& jsonUtf8)
+bool BarcodeScannerAddIn::EmitEvent(const char16_t* eventName, const std::string& dataUtf8)
 {
 	if (!m_connect)
 		return false;
 
-	const std::u16string data16 = bsz::ToU16(jsonUtf8);
+	const std::u16string data16 = bsz::ToU16(dataUtf8);
 
 	return m_connect->ExternalEvent(
 		const_cast<WCHAR_T*>(reinterpret_cast<const WCHAR_T*>(kEventSource)),
-		const_cast<WCHAR_T*>(reinterpret_cast<const WCHAR_T*>(kEventScan)),
+		const_cast<WCHAR_T*>(reinterpret_cast<const WCHAR_T*>(eventName)),
 		const_cast<WCHAR_T*>(reinterpret_cast<const WCHAR_T*>(data16.c_str())));
+}
+
+bool BarcodeScannerAddIn::EmitScanResult(const std::string& jsonUtf8)
+{
+	return EmitEvent(kEventScan, jsonUtf8);
 }
 
 bool BarcodeScannerAddIn::ReturnString(tVariant* value, const std::string& utf8)
