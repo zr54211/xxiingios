@@ -5,7 +5,11 @@
 -->
 <bundle xmlns="http://v8.1c.ru/8.2/addin/bundle" name="BarcodeScannerZXing">
     <component os="Android" arch="arm64"  path="Android/arm64-v8a/libBarcodeScannerZXing.so"   type="native"/>
+    <!-- Java-часть (UiBridge): apk = zip c classes.dex, собирается package/make-java.ps1 -->
+    <component os="Android" arch="arm64"  path="Android/BarcodeScannerZXing.apk" codeType="java" type="native"/>
+    <!-- TODO по мере сборки бинарников:
     <component os="Android" arch="arm"    path="Android/armeabi-v7a/libBarcodeScannerZXing.so" type="native"/>
     <component os="Android" arch="x86_64" path="Android/x86_64/libBarcodeScannerZXing.so"      type="native"/>
     <component os="iOS"     arch="arm64"  path="iOS/libBarcodeScannerZXing.a"                  type="native"/>
+    -->
 </bundle>

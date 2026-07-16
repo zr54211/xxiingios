@@ -5,3 +5,6 @@ dist/
 .idea/
 CMakeUserPresets.json
 *.user
+test-app/ib/
+test-app/ib85/
+test-app/publish/

@@ -1,0 +1,22 @@
+{
+  "title": "Тест сканера ВК",
+  "properties": { "autoTitle": false },
+  "elements": [
+    { "input": "Версия", "path": "Версия", "readOnly": true, "title": "Версия" },
+    { "group": "alwaysHorizontal", "name": "ГруппаКнопки", "children": [
+      { "button": "Подключить", "command": "Подключить" },
+      { "button": "Показать", "command": "Показать" },
+      { "button": "Скрыть", "command": "Скрыть" }
+    ]},
+    { "input": "Лог", "path": "Лог", "multiLine": true, "height": 10, "title": "Лог", "readOnly": true }
+  ],
+  "attributes": [
+    { "name": "Версия", "type": "string" },
+    { "name": "Лог", "type": "string" }
+  ],
+  "commands": [
+    { "name": "Подключить", "action": "ПодключитьНажатие" },
+    { "name": "Показать", "action": "ПоказатьНажатие" },
+    { "name": "Скрыть", "action": "СкрытьНажатие" }
+  ]
+}

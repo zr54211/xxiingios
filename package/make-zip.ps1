@@ -21,6 +21,7 @@ New-Item -ItemType Directory -Force "$staging/Android/x86_64" | Out-Null
 New-Item -ItemType Directory -Force "$staging/iOS" | Out-Null
 
 $items = @(
+    @{ src = "build-java/BarcodeScannerZXing.apk";            dst = "Android" },
     @{ src = "build-android-arm64/libBarcodeScannerZXing.so"; dst = "Android/arm64-v8a" },
     @{ src = "build-android-arm32/libBarcodeScannerZXing.so"; dst = "Android/armeabi-v7a" },
     @{ src = "build-android-x64/libBarcodeScannerZXing.so";   dst = "Android/x86_64" },
