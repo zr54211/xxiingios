@@ -9,9 +9,10 @@ struct ANativeWindow;
 
 namespace bsz::android {
 
-// Колбэк с JSON результата распознавания ({"found":..,"barcodes":[..]}).
+// Колбэк с JSON результата распознавания ({"found":..,"barcodes":[..]}) и
+// нормированными углами первого кода в координатах кадра анализа (8 float).
 // Вызывается из потока обработки кадров.
-using ScanEmitFn = std::function<void(const std::string& jsonUtf8)>;
+using ScanEmitFn = std::function<void(const std::string& jsonUtf8, const float* points8)>;
 
 // Открывает заднюю камеру (NDK Camera2 через dlopen, требует API 24+) и
 // запускает preview в переданную поверхность + поток кадров YUV в zxing.
@@ -28,6 +29,10 @@ bool CameraSetTorch(bool on);
 
 // Фокусировка в точке превью (нормированные координаты вида 0..1).
 void CameraFocusAt(float nx, float ny);
+
+// Перевод нормированной точки кадра анализа в нормированные координаты
+// вида превью (учитывает ориентацию сенсора).
+void CameraFrameToView(float fx, float fy, float& nx, float& ny);
 
 } // namespace bsz::android
 

@@ -6,9 +6,12 @@
 #include <android/native_window_jni.h>
 #include <jni.h>
 
+#include <array>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 
 #include "BarcodeScannerAddIn.h"
 #include "CameraScanner.h"
@@ -38,6 +41,7 @@ jmethodID g_overlayShow = nullptr;
 jmethodID g_overlayHide = nullptr;
 jmethodID g_overlayHasPermission = nullptr;
 jmethodID g_overlayRequestPermission = nullptr;
+jmethodID g_overlayShowMarkers = nullptr;
 
 ANativeWindow* g_previewWindow = nullptr; // живёт между onSurface(create/destroy)
 
@@ -114,6 +118,8 @@ void JNICALL NativeRun(JNIEnv* /*env*/, jclass /*cls*/, jlong ctx)
 	task->fn();
 }
 
+bool RunOnUiThread(JNIEnv* env, std::function<void()> fn);
+
 // Вызывается в UI-потоке при появлении (surface != null) и уничтожении
 // (surface == null) поверхности превью из ScannerOverlay.
 void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
@@ -143,7 +149,7 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 	}
 
 	const bool started = bsz::android::CameraStart(g_previewWindow, kFrameWidth, kFrameHeight,
-		[](const std::string& json) {
+		[](const std::string& json, const float* points) {
 
 			{
 				std::lock_guard<std::mutex> lock(g_ownerMutex);
@@ -153,8 +159,36 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 
 			}
 
-			if (g_autoClose)
+			// Маркеры по углам найденного кода (координаты кадра -> вида).
+			std::array<float, 8> view{};
+
+			for (int i = 0; i < 4; ++i)
+				bsz::android::CameraFrameToView(points[i * 2], points[i * 2 + 1],
+					view[i * 2], view[i * 2 + 1]);
+
+			JNIEnv* env = Env();
+
+			if (env)
+				RunOnUiThread(env, [view] {
+
+					JNIEnv* uiEnv = Env();
+
+					if (!uiEnv)
+						return;
+
+					const jfloatArray arr = uiEnv->NewFloatArray(8);
+					uiEnv->SetFloatArrayRegion(arr, 0, 8, view.data());
+					uiEnv->CallStaticVoidMethod(g_overlayCls, g_overlayShowMarkers, arr);
+					ClearPendingException(uiEnv, "showMarkers");
+					uiEnv->DeleteLocalRef(arr);
+
+				});
+
+			if (g_autoClose) {
+				// Даём маркерам мелькнуть перед закрытием экрана.
+				std::this_thread::sleep_for(std::chrono::milliseconds(400));
 				bsz::android::StopScanning();
+			}
 
 		});
 
@@ -244,9 +278,10 @@ bool EnsureJavaPart(JNIEnv* env, IAndroidComponentHelper* helper)
 		"hasCameraPermission", "(Landroid/app/Activity;)Z");
 	g_overlayRequestPermission = env->GetStaticMethodID(overlay,
 		"requestCameraPermission", "(Landroid/app/Activity;)V");
+	g_overlayShowMarkers = env->GetStaticMethodID(overlay, "showMarkers", "([F)V");
 
 	if (!g_bridgePost || !g_overlayShow || !g_overlayHide
-			|| !g_overlayHasPermission || !g_overlayRequestPermission
+			|| !g_overlayHasPermission || !g_overlayRequestPermission || !g_overlayShowMarkers
 			|| ClearPendingException(env, "GetStaticMethodID")) {
 		LOGE("Java part method lookup failed");
 		return false;

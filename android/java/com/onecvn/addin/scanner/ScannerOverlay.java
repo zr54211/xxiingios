@@ -2,8 +2,12 @@ package com.onecvn.addin.scanner;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Context;
 import android.content.pm.PackageManager;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.util.DisplayMetrics;
@@ -31,6 +35,41 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
 
     private final Activity activity;
     private FrameLayout root;
+    private MarkerView markerView;
+
+    // Контур найденного кода поверх превью.
+    private static final class MarkerView extends View {
+
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float[] points;
+
+        MarkerView(Context context, float strokeWidth) {
+            super(context);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(strokeWidth);
+            paint.setColor(0xFF00E676);
+        }
+
+        void setPoints(float[] normalized) {
+            points = normalized;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            if (points == null || points.length < 8)
+                return;
+
+            Path path = new Path();
+            path.moveTo(points[0] * getWidth(), points[1] * getHeight());
+
+            for (int i = 1; i < 4; i++)
+                path.lineTo(points[i * 2] * getWidth(), points[i * 2 + 1] * getHeight());
+
+            path.close();
+            canvas.drawPath(path, paint);
+        }
+    }
 
     private ScannerOverlay(Activity activity) {
         this.activity = activity;
@@ -60,6 +99,12 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
     public static void requestCameraPermission(Activity activity) {
         if (Build.VERSION.SDK_INT >= 23)
             activity.requestPermissions(new String[]{Manifest.permission.CAMERA}, 18127);
+    }
+
+    // Нормированные координаты вида превью: 4 угла найденного кода.
+    public static void showMarkers(float[] points) {
+        if (instance != null && instance.markerView != null)
+            instance.markerView.setPoints(points);
     }
 
     private int dp(float value) {
@@ -97,6 +142,11 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
         }
 
         root.addView(surfaceView,
+            new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
+
+        // Слой маркеров найденного кода — поверх превью, той же геометрии.
+        markerView = new MarkerView(activity, dp(3));
+        root.addView(markerView,
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
 
         // Рамка наводки по центру.
@@ -161,6 +211,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
         if (root != null && root.getParent() instanceof ViewGroup)
             ((ViewGroup) root.getParent()).removeView(root);
         root = null;
+        markerView = null;
     }
 
     @Override

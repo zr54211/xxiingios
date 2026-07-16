@@ -7,10 +7,14 @@
 
 namespace bsz {
 
-std::string DecodeLuminance(const uint8_t* data, int width, int height)
+DecodeResult DecodeLuminanceEx(const uint8_t* data, int width, int height)
 {
-	if (!data || width <= 0 || height <= 0)
-		return R"({"found":0,"barcodes":[],"error":"invalid frame parameters"})";
+	DecodeResult result;
+
+	if (!data || width <= 0 || height <= 0) {
+		result.json = R"({"found":0,"barcodes":[],"error":"invalid frame parameters"})";
+		return result;
+	}
 
 	const ZXing::ImageView image(data, width, height, ZXing::ImageFormat::Lum);
 
@@ -22,6 +26,7 @@ std::string DecodeLuminance(const uint8_t* data, int width, int height)
 		.setMaxNumberOfSymbols(1);
 
 	const auto barcodes = ZXing::ReadBarcodes(image, options);
+	result.found = static_cast<int>(barcodes.size());
 
 	std::string json = "{\"found\":" + std::to_string(barcodes.size()) + ",\"barcodes\":[";
 
@@ -30,13 +35,46 @@ std::string DecodeLuminance(const uint8_t* data, int width, int height)
 		if (!first)
 			json += ',';
 
+		const auto& position = barcode.position();
+
+		if (first) {
+
+			// Нормированные углы первого кода — для маркеров на превью.
+			const ZXing::PointI corners[4] = {position.topLeft(), position.topRight(),
+				position.bottomRight(), position.bottomLeft()};
+
+			for (int i = 0; i < 4; ++i) {
+				result.points[i * 2] = static_cast<float>(corners[i].x) / width;
+				result.points[i * 2 + 1] = static_cast<float>(corners[i].y) / height;
+			}
+
+		}
+
 		first = false;
 		json += "{\"format\":\"" + ZXing::ToString(barcode.format())
-			+ "\",\"text\":\"" + EscapeJson(barcode.text()) + "\"}";
+			+ "\",\"text\":\"" + EscapeJson(barcode.text())
+			+ "\",\"points\":[";
+
+		const ZXing::PointI pts[4] = {position.topLeft(), position.topRight(),
+			position.bottomRight(), position.bottomLeft()};
+
+		for (int i = 0; i < 4; ++i) {
+			if (i)
+				json += ',';
+			json += "[" + std::to_string(pts[i].x) + "," + std::to_string(pts[i].y) + "]";
+		}
+
+		json += "]}";
 	}
 
 	json += "]}";
-	return json;
+	result.json = std::move(json);
+	return result;
+}
+
+std::string DecodeLuminance(const uint8_t* data, int width, int height)
+{
+	return DecodeLuminanceEx(data, width, height).json;
 }
 
 std::string ZXingVersion()

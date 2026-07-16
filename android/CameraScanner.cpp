@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "Decoder.h"
@@ -58,6 +59,7 @@ struct CameraApi {
 	decltype(&ACaptureSessionOutputContainer_add) OutputContainerAdd{};
 	decltype(&ACaptureSessionOutputContainer_free) OutputContainerFree{};
 	decltype(&ACameraCaptureSession_setRepeatingRequest) SetRepeatingRequest{};
+	decltype(&ACameraCaptureSession_capture) Capture{};
 	decltype(&ACameraCaptureSession_stopRepeating) StopRepeating{};
 	decltype(&ACameraCaptureSession_close) SessionClose{};
 
@@ -126,6 +128,7 @@ struct CameraApi {
 			&& Sym(cam, "ACaptureSessionOutputContainer_add", OutputContainerAdd)
 			&& Sym(cam, "ACaptureSessionOutputContainer_free", OutputContainerFree)
 			&& Sym(cam, "ACameraCaptureSession_setRepeatingRequest", SetRepeatingRequest)
+			&& Sym(cam, "ACameraCaptureSession_capture", Capture)
 			&& Sym(cam, "ACameraCaptureSession_stopRepeating", StopRepeating)
 			&& Sym(cam, "ACameraCaptureSession_close", SessionClose)
 			&& Sym(media, "AImageReader_new", ImageReaderNew)
@@ -168,6 +171,9 @@ int32_t g_activeRight = 0;
 int32_t g_activeBottom = 0;
 int32_t g_sensorOrientation = 90;
 bool g_flashAvailable = false;
+
+// Поколение tap-to-focus: отменяет возврат в continuous при повторном тапе.
+std::atomic<uint64_t> g_focusGeneration{0};
 
 // Подавление повторной отправки того же результата при непрерывном сканировании.
 std::string g_lastJson;
@@ -234,23 +240,23 @@ void OnImageAvailable(void* /*ctx*/, AImageReader* reader)
 
 	g_api.ImageDelete(image);
 
-	const std::string json = bsz::DecodeLuminance(buffer.data(), width, height);
+	const bsz::DecodeResult decoded = bsz::DecodeLuminanceEx(buffer.data(), width, height);
 
-	if (json.rfind(R"({"found":0)", 0) == 0)
+	if (decoded.found == 0)
 		return;
 
 	// Один и тот же код не чаще раза в 2 секунды.
 	const auto now = std::chrono::steady_clock::now();
 
-	if (json == g_lastJson && now - g_lastEmitAt < std::chrono::seconds(2))
+	if (decoded.json == g_lastJson && now - g_lastEmitAt < std::chrono::seconds(2))
 		return;
 
-	g_lastJson = json;
+	g_lastJson = decoded.json;
 	g_lastEmitAt = now;
-	LOGI("Barcode found: %s", json.c_str());
+	LOGI("Barcode found: %s", decoded.json.c_str());
 
 	if (g_emit)
-		g_emit(json);
+		g_emit(decoded.json, decoded.points);
 }
 
 // Выбирает размер YUV-потока анализа: максимальная площадь, не превышающая
@@ -528,6 +534,28 @@ void CameraStop()
 	LOGI("Camera stopped");
 }
 
+void CameraFrameToView(float fx, float fy, float& nx, float& ny)
+{
+	switch (g_sensorOrientation) {
+	case 90:
+		nx = 1.0f - fy;
+		ny = fx;
+		break;
+	case 270:
+		nx = fy;
+		ny = 1.0f - fx;
+		break;
+	case 180:
+		nx = 1.0f - fx;
+		ny = 1.0f - fy;
+		break;
+	default:
+		nx = fx;
+		ny = fy;
+		break;
+	}
+}
+
 bool CameraSetTorch(bool on)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
@@ -603,19 +631,47 @@ void CameraFocusAt(float nx, float ny)
 		std::min(g_activeBottom, cy + half),
 		1000};
 
-	// Continuous AF/AE на большинстве устройств учитывают регионы без
-	// отдельного триггера; неподдерживаемые регионы только логируем.
+	// Continuous AF регионы игнорирует (Samsung точно): честный tap-to-focus —
+	// это AF_MODE_AUTO + регион + AF_TRIGGER_START, затем возврат в continuous.
 	if (g_api.RequestSetEntryI32(g_cam.request, ACAMERA_CONTROL_AF_REGIONS, 5, region)
 			!= ACAMERA_OK)
 		LOGI("FocusAt: AF regions are not supported");
 
 	g_api.RequestSetEntryI32(g_cam.request, ACAMERA_CONTROL_AE_REGIONS, 5, region);
 
-	if (g_api.SetRepeatingRequest(g_cam.session, nullptr, 1, &g_cam.request, nullptr)
-			!= ACAMERA_OK)
-		LOGE("FocusAt: setRepeatingRequest failed");
-	else
-		LOGI("Focus region set around (%.2f, %.2f)", nx, ny);
+	uint8_t afMode = ACAMERA_CONTROL_AF_MODE_AUTO;
+	g_api.RequestSetEntryU8(g_cam.request, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
+
+	uint8_t trigger = ACAMERA_CONTROL_AF_TRIGGER_START;
+	g_api.RequestSetEntryU8(g_cam.request, ACAMERA_CONTROL_AF_TRIGGER, 1, &trigger);
+
+	if (g_api.Capture(g_cam.session, nullptr, 1, &g_cam.request, nullptr) != ACAMERA_OK) {
+		LOGE("FocusAt: trigger capture failed");
+		return;
+	}
+
+	// Повторяющийся запрос — без триггера (иначе AF перезапускается каждый кадр).
+	trigger = ACAMERA_CONTROL_AF_TRIGGER_IDLE;
+	g_api.RequestSetEntryU8(g_cam.request, ACAMERA_CONTROL_AF_TRIGGER, 1, &trigger);
+	g_api.SetRepeatingRequest(g_cam.session, nullptr, 1, &g_cam.request, nullptr);
+	LOGI("Focus triggered around (%.2f, %.2f)", nx, ny);
+
+	// Через несколько секунд возвращаемся к непрерывному автофокусу.
+	const uint64_t generation = ++g_focusGeneration;
+	std::thread([generation] {
+
+		std::this_thread::sleep_for(std::chrono::seconds(4));
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		if (!g_running.load() || generation != g_focusGeneration || !g_cam.request || !g_cam.session)
+			return;
+
+		const uint8_t continuous = ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE;
+		g_api.RequestSetEntryU8(g_cam.request, ACAMERA_CONTROL_AF_MODE, 1, &continuous);
+		g_api.SetRepeatingRequest(g_cam.session, nullptr, 1, &g_cam.request, nullptr);
+		LOGI("Focus back to continuous");
+
+	}).detach();
 }
 
 } // namespace bsz::android
