@@ -37,14 +37,18 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
     private FrameLayout root;
     private MarkerView markerView;
 
-    // Скруглённые уголки по четырём углам найденного кода (как у системного
-    // сканера Samsung): каждый уголок — две короткие дуги вдоль смежных сторон.
+    // Четыре скруглённых уголка (как у системного сканера Samsung): в покое —
+    // широкая рамка наводки по центру, при находке плавно перетекают к углам
+    // кода и следуют за ним, при потере — возвращаются на место.
     private static final class MarkerView extends View {
 
         private static final float BRACKET_PART = 0.3f; // доля стороны под уголок
+        private static final float LERP = 0.35f;        // скорость перетекания за кадр
 
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private float[] points;
+        private float[] target;
+        private float[] current;
+        private boolean hasCode;
 
         MarkerView(Context context, float strokeWidth, float cornerRadius) {
             super(context);
@@ -52,29 +56,63 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
             paint.setStrokeWidth(strokeWidth);
             paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setPathEffect(new android.graphics.CornerPathEffect(cornerRadius));
-            paint.setColor(0xFF00E676);
         }
 
         void setPoints(float[] normalized) {
-            points = normalized;
+            hasCode = normalized != null && normalized.length >= 8;
+            target = hasCode ? normalized : idleFrame();
             invalidate();
+        }
+
+        // Рамка наводки: квадрат ~70% меньшей стороны по центру (нормированно).
+        private float[] idleFrame() {
+            float w = getWidth();
+            float h = getHeight();
+
+            if (w <= 0 || h <= 0)
+                return null;
+
+            float half = Math.min(w, h) * 0.35f;
+            float left = (w / 2 - half) / w;
+            float right = (w / 2 + half) / w;
+            float top = (h / 2 - half) / h;
+            float bottom = (h / 2 + half) / h;
+            return new float[]{left, top, right, top, right, bottom, left, bottom};
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
-            if (points == null || points.length < 8)
+            if (target == null)
+                target = idleFrame();
+
+            if (target == null)
                 return;
+
+            if (current == null)
+                current = target.clone();
+
+            // Плавное перетекание к цели; пока не доехали — перерисовываемся.
+            boolean settled = true;
+
+            for (int i = 0; i < 8; i++) {
+                current[i] += (target[i] - current[i]) * LERP;
+
+                if (Math.abs(target[i] - current[i]) > 0.001f)
+                    settled = false;
+            }
+
+            paint.setColor(hasCode ? 0xFF00E676 : 0xCCFFFFFF);
 
             float w = getWidth();
             float h = getHeight();
 
             for (int i = 0; i < 4; i++) {
-                float cx = points[i * 2] * w;
-                float cy = points[i * 2 + 1] * h;
-                float px = points[((i + 3) % 4) * 2] * w;
-                float py = points[((i + 3) % 4) * 2 + 1] * h;
-                float nx = points[((i + 1) % 4) * 2] * w;
-                float ny = points[((i + 1) % 4) * 2 + 1] * h;
+                float cx = current[i * 2] * w;
+                float cy = current[i * 2 + 1] * h;
+                float px = current[((i + 3) % 4) * 2] * w;
+                float py = current[((i + 3) % 4) * 2 + 1] * h;
+                float nx = current[((i + 1) % 4) * 2] * w;
+                float ny = current[((i + 1) % 4) * 2 + 1] * h;
 
                 Path bracket = new Path();
                 bracket.moveTo(cx + (px - cx) * BRACKET_PART, cy + (py - cy) * BRACKET_PART);
@@ -82,6 +120,9 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
                 bracket.lineTo(cx + (nx - cx) * BRACKET_PART, cy + (ny - cy) * BRACKET_PART);
                 canvas.drawPath(bracket, paint);
             }
+
+            if (!settled)
+                postInvalidateOnAnimation();
         }
     }
 
@@ -158,21 +199,10 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
         root.addView(surfaceView,
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
 
-        // Слой маркеров найденного кода — поверх превью, той же геометрии.
+        // Уголки: рамка наводки в покое, сопровождение кода при находке.
         markerView = new MarkerView(activity, dp(4), dp(6));
         root.addView(markerView,
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
-
-        // Рамка наводки по центру.
-        View frame = new View(activity);
-        GradientDrawable frameShape = new GradientDrawable();
-        frameShape.setColor(Color.TRANSPARENT);
-        frameShape.setStroke(dp(2), 0xCCFFFFFF);
-        frameShape.setCornerRadius(dp(12));
-        frame.setBackground(frameShape);
-        int frameSize = (int) (Math.min(viewWidth, viewHeight) * 0.7f);
-        root.addView(frame,
-            new FrameLayout.LayoutParams(frameSize, frameSize, Gravity.CENTER));
 
         // Кнопка закрытия.
         TextView close = new TextView(activity);
