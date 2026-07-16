@@ -37,16 +37,21 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
     private FrameLayout root;
     private MarkerView markerView;
 
-    // Контур найденного кода поверх превью.
+    // Скруглённые уголки по четырём углам найденного кода (как у системного
+    // сканера Samsung): каждый уголок — две короткие дуги вдоль смежных сторон.
     private static final class MarkerView extends View {
+
+        private static final float BRACKET_PART = 0.3f; // доля стороны под уголок
 
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private float[] points;
 
-        MarkerView(Context context, float strokeWidth) {
+        MarkerView(Context context, float strokeWidth, float cornerRadius) {
             super(context);
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(strokeWidth);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setPathEffect(new android.graphics.CornerPathEffect(cornerRadius));
             paint.setColor(0xFF00E676);
         }
 
@@ -60,14 +65,23 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
             if (points == null || points.length < 8)
                 return;
 
-            Path path = new Path();
-            path.moveTo(points[0] * getWidth(), points[1] * getHeight());
+            float w = getWidth();
+            float h = getHeight();
 
-            for (int i = 1; i < 4; i++)
-                path.lineTo(points[i * 2] * getWidth(), points[i * 2 + 1] * getHeight());
+            for (int i = 0; i < 4; i++) {
+                float cx = points[i * 2] * w;
+                float cy = points[i * 2 + 1] * h;
+                float px = points[((i + 3) % 4) * 2] * w;
+                float py = points[((i + 3) % 4) * 2 + 1] * h;
+                float nx = points[((i + 1) % 4) * 2] * w;
+                float ny = points[((i + 1) % 4) * 2 + 1] * h;
 
-            path.close();
-            canvas.drawPath(path, paint);
+                Path bracket = new Path();
+                bracket.moveTo(cx + (px - cx) * BRACKET_PART, cy + (py - cy) * BRACKET_PART);
+                bracket.lineTo(cx, cy);
+                bracket.lineTo(cx + (nx - cx) * BRACKET_PART, cy + (ny - cy) * BRACKET_PART);
+                canvas.drawPath(bracket, paint);
+            }
         }
     }
 
@@ -145,7 +159,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
 
         // Слой маркеров найденного кода — поверх превью, той же геометрии.
-        markerView = new MarkerView(activity, dp(3));
+        markerView = new MarkerView(activity, dp(4), dp(6));
         root.addView(markerView,
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
 
