@@ -3,11 +3,15 @@
 #include "AndroidScanner.h"
 
 #include <android/log.h>
+#include <android/native_window_jni.h>
 #include <jni.h>
 
 #include <functional>
 #include <memory>
+#include <mutex>
 
+#include "BarcodeScannerAddIn.h"
+#include "CameraScanner.h"
 #include "IAndroidComponentHelper.h"
 
 #define LOG_TAG "BarcodeScannerZXing"
@@ -16,11 +20,27 @@
 
 namespace {
 
+constexpr int kFrameWidth = 1280; // = ScannerOverlay.BUFFER_WIDTH
+constexpr int kFrameHeight = 720;
+
 JavaVM* g_vm = nullptr;
-jobject g_overlay = nullptr;   // GlobalRef на показанный View
-jobject g_activity = nullptr;  // GlobalRef на Activity 1С (сохраняется при первом показе)
-jclass g_bridgeCls = nullptr;  // GlobalRef на com.onecvn.addin.scanner.UiBridge
+jobject g_activity = nullptr; // GlobalRef на Activity 1С
+
+// UiBridge: диспетчеризация в UI-поток.
+jclass g_bridgeCls = nullptr;
 jmethodID g_bridgePost = nullptr;
+
+// ScannerOverlay: экран сканера и разрешение камеры.
+jclass g_overlayCls = nullptr;
+jmethodID g_overlayShow = nullptr;
+jmethodID g_overlayHide = nullptr;
+jmethodID g_overlayHasPermission = nullptr;
+jmethodID g_overlayRequestPermission = nullptr;
+
+ANativeWindow* g_previewWindow = nullptr; // живёт между onSurface(create/destroy)
+
+std::mutex g_ownerMutex;
+BarcodeScannerAddIn* g_owner = nullptr;
 
 // Задача, исполняемая в UI-потоке через UiBridge.post -> runOnUiThread -> nativeRun.
 struct UiTask {
@@ -28,8 +48,7 @@ struct UiTask {
 };
 
 // Платформа грузит компоненту через System.loadLibrary -> JNI_OnLoad должен
-// отработать. Если g_vm останется нулевым — фиксируем в logcat и уточняем
-// способ получения JavaVM по templateMobile (см. android/README.md).
+// отработать. Если g_vm останется нулевым — фиксируем в logcat.
 JNIEnv* Env()
 {
 	if (!g_vm) {
@@ -60,58 +79,112 @@ bool ClearPendingException(JNIEnv* env, const char* where)
 	return true;
 }
 
-bool IsMainThread(JNIEnv* env)
-{
-	jclass looperCls = env->FindClass("android/os/Looper");
-
-	if (!looperCls || ClearPendingException(env, "FindClass(Looper)"))
-		return false;
-
-	const jmethodID myLooper = env->GetStaticMethodID(looperCls, "myLooper", "()Landroid/os/Looper;");
-	const jmethodID mainLooper = env->GetStaticMethodID(looperCls, "getMainLooper", "()Landroid/os/Looper;");
-
-	const jobject my = env->CallStaticObjectMethod(looperCls, myLooper);
-	const jobject main = env->CallStaticObjectMethod(looperCls, mainLooper);
-
-	return my && main && env->IsSameObject(my, main);
-}
-
 void JNICALL NativeRun(JNIEnv* /*env*/, jclass /*cls*/, jlong ctx)
 {
 	std::unique_ptr<UiTask> task(reinterpret_cast<UiTask*>(ctx));
 	task->fn();
 }
 
-// Находит UiBridge из Java-части компоненты (apk) и регистрирует nativeRun.
-bool EnsureBridge(JNIEnv* env, IAndroidComponentHelper* helper)
+// Вызывается в UI-потоке при появлении (surface != null) и уничтожении
+// (surface == null) поверхности превью из ScannerOverlay.
+void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 {
-	if (g_bridgeCls)
+	if (!surface) {
+
+		bsz::android::CameraStop();
+
+		if (g_previewWindow) {
+			ANativeWindow_release(g_previewWindow);
+			g_previewWindow = nullptr;
+		}
+
+		return;
+	}
+
+	if (g_previewWindow) {
+		// surfaceChanged может приходить повторно — камера уже работает.
+		return;
+	}
+
+	g_previewWindow = ANativeWindow_fromSurface(env, surface);
+
+	if (!g_previewWindow) {
+		LOGE("ANativeWindow_fromSurface returned null");
+		return;
+	}
+
+	const bool started = bsz::android::CameraStart(g_previewWindow, kFrameWidth, kFrameHeight,
+		[](const std::string& json) {
+
+			std::lock_guard<std::mutex> lock(g_ownerMutex);
+
+			if (g_owner)
+				g_owner->EmitScanResult(json);
+
+		});
+
+	if (!started) {
+		ANativeWindow_release(g_previewWindow);
+		g_previewWindow = nullptr;
+	}
+}
+
+jclass FindComponentClass(JNIEnv* env, IAndroidComponentHelper* helper, const char16_t* name)
+{
+	const jclass cls = helper->FindClass(reinterpret_cast<const WCHAR_T*>(name));
+
+	if (!cls || ClearPendingException(env, "FindClass"))
+		return nullptr;
+
+	return cls;
+}
+
+// Находит классы Java-части компоненты (apk) и регистрирует нативные колбэки.
+bool EnsureJavaPart(JNIEnv* env, IAndroidComponentHelper* helper)
+{
+	if (g_bridgeCls && g_overlayCls)
 		return true;
 
-	static const char16_t kClassName[] = u"com.onecvn.addin.scanner.UiBridge";
-	const jclass cls = helper->FindClass(reinterpret_cast<const WCHAR_T*>(kClassName));
+	const jclass bridge = FindComponentClass(env, helper, u"com.onecvn.addin.scanner.UiBridge");
+	const jclass overlay = FindComponentClass(env, helper, u"com.onecvn.addin.scanner.ScannerOverlay");
 
-	if (!cls || ClearPendingException(env, "FindClass(UiBridge)")) {
-		LOGE("UiBridge class not found: java part (apk) is missing from the bundle?");
+	if (!bridge || !overlay) {
+		LOGE("Java part classes not found: apk is missing from the bundle?");
 		return false;
 	}
 
-	static const JNINativeMethod methods[] = {
+	static const JNINativeMethod bridgeMethods[] = {
 		{"nativeRun", "(J)V", reinterpret_cast<void*>(&NativeRun)},
 	};
+	static const JNINativeMethod overlayMethods[] = {
+		{"onSurface", "(Landroid/view/Surface;)V", reinterpret_cast<void*>(&NativeOnSurface)},
+	};
 
-	if (env->RegisterNatives(cls, methods, 1) != JNI_OK || ClearPendingException(env, "RegisterNatives")) {
-		LOGE("RegisterNatives(UiBridge.nativeRun) failed");
+	if (env->RegisterNatives(bridge, bridgeMethods, 1) != JNI_OK
+			|| env->RegisterNatives(overlay, overlayMethods, 1) != JNI_OK
+			|| ClearPendingException(env, "RegisterNatives")) {
+		LOGE("RegisterNatives failed");
 		return false;
 	}
 
-	g_bridgePost = env->GetStaticMethodID(cls, "post", "(Landroid/app/Activity;J)V");
+	g_bridgePost = env->GetStaticMethodID(bridge, "post", "(Landroid/app/Activity;J)V");
+	g_overlayShow = env->GetStaticMethodID(overlay, "show", "(Landroid/app/Activity;)V");
+	g_overlayHide = env->GetStaticMethodID(overlay, "hide", "()V");
+	g_overlayHasPermission = env->GetStaticMethodID(overlay,
+		"hasCameraPermission", "(Landroid/app/Activity;)Z");
+	g_overlayRequestPermission = env->GetStaticMethodID(overlay,
+		"requestCameraPermission", "(Landroid/app/Activity;)V");
 
-	if (!g_bridgePost || ClearPendingException(env, "GetStaticMethodID(post)"))
+	if (!g_bridgePost || !g_overlayShow || !g_overlayHide
+			|| !g_overlayHasPermission || !g_overlayRequestPermission
+			|| ClearPendingException(env, "GetStaticMethodID")) {
+		LOGE("Java part method lookup failed");
 		return false;
+	}
 
-	g_bridgeCls = static_cast<jclass>(env->NewGlobalRef(cls));
-	LOGI("UiBridge ready");
+	g_bridgeCls = static_cast<jclass>(env->NewGlobalRef(bridge));
+	g_overlayCls = static_cast<jclass>(env->NewGlobalRef(overlay));
+	LOGI("Java part ready (UiBridge, ScannerOverlay)");
 	return true;
 }
 
@@ -135,98 +208,10 @@ bool RunOnUiThread(JNIEnv* env, std::function<void()> fn)
 	return true;
 }
 
-// Тело пробы: выполняется строго в UI-потоке.
-void ShowOverlayOnUiThread()
-{
-	JNIEnv* env = Env();
-
-	if (!env || g_overlay)
-		return;
-
-	LOGI("ShowOverlayOnUiThread: on main thread = %s", IsMainThread(env) ? "true" : "false");
-
-	const jclass viewCls = env->FindClass("android/view/View");
-	const jmethodID viewCtor = env->GetMethodID(viewCls, "<init>", "(Landroid/content/Context;)V");
-	const jobject view = env->NewObject(viewCls, viewCtor, g_activity);
-
-	if (!view || ClearPendingException(env, "new View(activity)"))
-		return;
-
-	// Полупрозрачный зелёный, чтобы проба была видна поверх формы 1С.
-	const jmethodID setBg = env->GetMethodID(viewCls, "setBackgroundColor", "(I)V");
-	env->CallVoidMethod(view, setBg, static_cast<jint>(0x8800CC00));
-
-	const jclass lpCls = env->FindClass("android/view/ViewGroup$LayoutParams");
-	const jmethodID lpCtor = env->GetMethodID(lpCls, "<init>", "(II)V");
-	const jobject lp = env->NewObject(lpCls, lpCtor, -1, -1); // MATCH_PARENT x2
-
-	if (!lp || ClearPendingException(env, "new LayoutParams"))
-		return;
-
-	const jclass activityCls = env->GetObjectClass(g_activity);
-	const jmethodID addContentView = env->GetMethodID(activityCls,
-		"addContentView", "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V");
-
-	env->CallVoidMethod(g_activity, addContentView, view, lp);
-
-	if (ClearPendingException(env, "addContentView"))
-		return;
-
-	g_overlay = env->NewGlobalRef(view);
-	LOGI("Overlay shown");
-}
-
-void HideOverlayOnUiThread()
-{
-	JNIEnv* env = Env();
-
-	if (!env || !g_overlay)
-		return;
-
-	const jclass viewCls = env->GetObjectClass(g_overlay);
-	const jmethodID getParent = env->GetMethodID(viewCls, "getParent", "()Landroid/view/ViewParent;");
-	const jobject parent = env->CallObjectMethod(g_overlay, getParent);
-
-	if (parent && !ClearPendingException(env, "getParent")) {
-
-		const jclass groupCls = env->FindClass("android/view/ViewGroup");
-
-		if (env->IsInstanceOf(parent, groupCls)) {
-
-			const jmethodID removeView = env->GetMethodID(groupCls,
-				"removeView", "(Landroid/view/View;)V");
-			env->CallVoidMethod(parent, removeView, g_overlay);
-			ClearPendingException(env, "removeView");
-
-		}
-
-	}
-
-	env->DeleteGlobalRef(g_overlay);
-	g_overlay = nullptr;
-	LOGI("Overlay hidden");
-}
-
-} // namespace
-
-extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/)
-{
-	g_vm = vm;
-	LOGI("JNI_OnLoad: JavaVM captured");
-	return JNI_VERSION_1_6;
-}
-
-namespace bsz::android {
-
-bool ShowOverlayProbe(IAddInDefBase* connect)
+bool EnsureInfra(IAddInDefBase* connect)
 {
 	if (!connect)
 		return false;
-
-	if (g_overlay) {
-		LOGI("Overlay already shown");
-		return true;
-	}
 
 	// Мобильная платформа реализует расширенный интерфейс подключения.
 	auto* connectEx = static_cast<IAddInDefBaseEx*>(connect);
@@ -256,23 +241,101 @@ bool ShowOverlayProbe(IAddInDefBase* connect)
 
 	}
 
-	if (!EnsureBridge(env, helper))
-		return false;
-
-	return RunOnUiThread(env, ShowOverlayOnUiThread);
+	return EnsureJavaPart(env, helper);
 }
 
-bool HideOverlayProbe()
+} // namespace
+
+extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/)
 {
-	if (!g_overlay)
-		return true;
+	g_vm = vm;
+	LOGI("JNI_OnLoad: JavaVM captured");
+	return JNI_VERSION_1_6;
+}
+
+namespace bsz::android {
+
+StartScanResult StartScanning(IAddInDefBase* connect, BarcodeScannerAddIn* owner)
+{
+	if (!EnsureInfra(connect))
+		return StartScanResult::Failed;
+
+	JNIEnv* env = Env();
+
+	if (!env)
+		return StartScanResult::Failed;
+
+	{
+		std::lock_guard<std::mutex> lock(g_ownerMutex);
+		g_owner = owner;
+	}
+
+	const jboolean granted = env->CallStaticBooleanMethod(g_overlayCls,
+		g_overlayHasPermission, g_activity);
+
+	if (ClearPendingException(env, "hasCameraPermission"))
+		return StartScanResult::Failed;
+
+	if (!granted) {
+
+		LOGI("CAMERA permission is not granted, requesting");
+		RunOnUiThread(env, [] {
+
+			JNIEnv* uiEnv = Env();
+
+			if (!uiEnv)
+				return;
+
+			uiEnv->CallStaticVoidMethod(g_overlayCls, g_overlayRequestPermission, g_activity);
+			ClearPendingException(uiEnv, "requestCameraPermission");
+
+		});
+
+		return StartScanResult::PermissionRequested;
+	}
+
+	const bool posted = RunOnUiThread(env, [] {
+
+		JNIEnv* uiEnv = Env();
+
+		if (!uiEnv)
+			return;
+
+		uiEnv->CallStaticVoidMethod(g_overlayCls, g_overlayShow, g_activity);
+		ClearPendingException(uiEnv, "ScannerOverlay.show");
+
+	});
+
+	return posted ? StartScanResult::Started : StartScanResult::Failed;
+}
+
+bool StopScanning()
+{
+	{
+		std::lock_guard<std::mutex> lock(g_ownerMutex);
+		g_owner = nullptr;
+	}
+
+	if (!g_overlayCls || !g_activity)
+		return true; // сканер не показывался
 
 	JNIEnv* env = Env();
 
 	if (!env)
 		return false;
 
-	return RunOnUiThread(env, HideOverlayOnUiThread);
+	// hide() снимет View, surfaceDestroyed -> onSurface(null) остановит камеру.
+	return RunOnUiThread(env, [] {
+
+		JNIEnv* uiEnv = Env();
+
+		if (!uiEnv)
+			return;
+
+		uiEnv->CallStaticVoidMethod(g_overlayCls, g_overlayHide);
+		ClearPendingException(uiEnv, "ScannerOverlay.hide");
+
+	});
 }
 
 } // namespace bsz::android

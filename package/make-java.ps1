@@ -19,9 +19,10 @@ $out = Join-Path $root "build-java"
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force "$out\classes", "$out\dex" | Out-Null
 
+$sources = @(Get-ChildItem (Join-Path $root "android\java") -Recurse -Filter *.java |
+    ForEach-Object FullName)
 & $Javac -encoding UTF-8 -source 8 -target 8 -bootclasspath $androidJar `
-    -d "$out\classes" `
-    (Join-Path $root "android\java\com\onecvn\addin\scanner\UiBridge.java")
+    -d "$out\classes" @sources
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 # d8 не принимает абсолютные Windows-пути входных классов — передаём относительные.

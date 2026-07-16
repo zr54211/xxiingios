@@ -47,6 +47,7 @@ if ($missing.Count -gt 0) {
 }
 
 Copy-Item (Join-Path $PSScriptRoot "manifest.xml") $staging
+Copy-Item (Join-Path $PSScriptRoot "ANDROID_MANIFEST_EXTENTIONS.XML") $staging
 Copy-Item (Join-Path $root "deps/zxing-cpp/LICENSE") (Join-Path $staging "LICENSE-zxing-cpp.txt")
 
 $zipPath = Join-Path $root "$OutDir/BarcodeScannerZXing.zip"

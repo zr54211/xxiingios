@@ -79,6 +79,9 @@ long ADDIN_API BarcodeScannerAddIn::GetInfo()
 
 void ADDIN_API BarcodeScannerAddIn::Done()
 {
+#if defined(__ANDROID__)
+	bsz::android::StopScanning();
+#endif
 	m_connect = nullptr;
 	m_memory = nullptr;
 }
@@ -214,12 +217,19 @@ bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* /
 	switch (methodNum) {
 	case eMethStartScanning:
 #if defined(__ANDROID__)
-		// Этап 2, проба UI: оверлей поверх Activity 1С вместо экрана сканера.
-		if (bsz::android::ShowOverlayProbe(m_connect))
+		switch (bsz::android::StartScanning(m_connect, this)) {
+		case bsz::android::StartScanResult::Started:
 			return true;
 
-		PostError(u"НачатьСканирование: не удалось показать оверлей (см. logcat BarcodeScannerZXing)");
-		return false;
+		case bsz::android::StartScanResult::PermissionRequested:
+			PostError(u"НачатьСканирование: нет разрешения на камеру — показан системный запрос,"
+				u" повторите вызов после выдачи разрешения");
+			return false;
+
+		default:
+			PostError(u"НачатьСканирование: не удалось запустить сканер (см. logcat BarcodeScannerZXing)");
+			return false;
+		}
 #else
 		PostError(u"НачатьСканирование: экран сканера ещё не реализован для этой ОС");
 		return false;
@@ -227,7 +237,7 @@ bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* /
 
 	case eMethStopScanning:
 #if defined(__ANDROID__)
-		return bsz::android::HideOverlayProbe();
+		return bsz::android::StopScanning();
 #else
 		PostError(u"ЗавершитьСканирование: экран сканера ещё не реализован для этой ОС");
 		return false;

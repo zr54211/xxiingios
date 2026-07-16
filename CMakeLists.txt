@@ -52,7 +52,13 @@ endif()
 if(ANDROID)
     target_sources(${PROJECT_NAME} PRIVATE
         android/AndroidScanner.cpp
-        android/AndroidScanner.h)
+        android/AndroidScanner.h
+        android/CameraScanner.cpp
+        android/CameraScanner.h)
     target_include_directories(${PROJECT_NAME} PRIVATE android)
-    target_link_libraries(${PROJECT_NAME} PRIVATE log)
+    # camera2ndk/mediandk загружаются через dlopen (API 24+ при сборке под android-21);
+    # без weak-режима NDK запрещает даже decltype на функциях API 24.
+    set_source_files_properties(android/CameraScanner.cpp PROPERTIES
+        COMPILE_DEFINITIONS __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__)
+    target_link_libraries(${PROJECT_NAME} PRIVATE log android)
 endif()

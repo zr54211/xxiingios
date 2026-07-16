@@ -8,6 +8,9 @@
 	</Title>
 	<AutoTitle>false</AutoTitle>
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<Events>
+		<Event name="ExternalEvent">ВнешнееСобытие</Event>
+	</Events>
 	<ChildItems>
 		<InputField name="Версия" id="1">
 			<DataPath>Версия</DataPath>
