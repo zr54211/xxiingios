@@ -19,7 +19,9 @@ DecodeResult DecodeLuminanceEx(const uint8_t* data, int width, int height)
 	const ZXing::ImageView image(data, width, height, ZXing::ImageFormat::Lum);
 
 	// TryHarder/TryRotate/TryInvert — целимся в плотные мятые QR, скорость вторична.
+	// Только двумерные коды (QR, DataMatrix, Aztec...) — линейные не нужны.
 	const auto options = ZXing::ReaderOptions()
+		.setFormats(ZXing::BarcodeFormat::AllMatrix)
 		.setTryHarder(true)
 		.setTryRotate(true)
 		.setTryInvert(true)

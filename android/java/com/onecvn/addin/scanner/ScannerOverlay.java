@@ -13,6 +13,7 @@ import android.os.Build;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -42,8 +43,9 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
     // кода и следуют за ним, при потере — возвращаются на место.
     private static final class MarkerView extends View {
 
-        private static final float BRACKET_PART = 0.3f; // доля стороны под уголок
+        private static final float BRACKET_PART = 0.10f; // доля стороны под уголок
         private static final float LERP = 0.35f;        // скорость перетекания за кадр
+        private static final float CODE_PADDING_PX = 15f; // отступ рамки от кода наружу
 
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private float[] target;
@@ -60,8 +62,88 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
 
         void setPoints(float[] normalized) {
             hasCode = normalized != null && normalized.length >= 8;
-            target = hasCode ? normalized : idleFrame();
+            target = hasCode ? expandAroundCode(toViewOrder(normalized)) : idleFrame();
             invalidate();
+        }
+
+        // Распознаватель отдаёт углы в системе координат кода (его "верхний левый"
+        // поворачивается вместе с кодом). Пересортировка по углу вокруг центра
+        // приводит их к порядку экрана: каждый уголок бежит к ближайшему углу кода.
+        private float[] toViewOrder(float[] p) {
+            float cx = 0;
+            float cy = 0;
+
+            for (int i = 0; i < 4; i++) {
+                cx += p[i * 2] / 4f;
+                cy += p[i * 2 + 1] / 4f;
+            }
+
+            int[] order = {0, 1, 2, 3};
+            double[] angle = new double[4];
+
+            for (int i = 0; i < 4; i++)
+                angle[i] = Math.atan2(p[i * 2 + 1] - cy, p[i * 2] - cx);
+
+            for (int i = 0; i < 3; i++) {
+
+                for (int j = i + 1; j < 4; j++) {
+
+                    if (angle[order[j]] < angle[order[i]]) {
+                        int t = order[i];
+                        order[i] = order[j];
+                        order[j] = t;
+                    }
+
+                }
+
+            }
+
+            float[] sorted = new float[8];
+
+            for (int i = 0; i < 4; i++) {
+                sorted[i * 2] = p[order[i] * 2];
+                sorted[i * 2 + 1] = p[order[i] * 2 + 1];
+            }
+
+            return sorted;
+        }
+
+        // Раздвигает четырёхугольник кода наружу от центра на CODE_PADDING_PX,
+        // чтобы рамка была чуть шире самого кода.
+        private float[] expandAroundCode(float[] normalized) {
+            float w = getWidth();
+            float h = getHeight();
+
+            if (w <= 0 || h <= 0)
+                return normalized;
+
+            float cx = 0;
+            float cy = 0;
+
+            for (int i = 0; i < 4; i++) {
+                cx += normalized[i * 2] * w / 4;
+                cy += normalized[i * 2 + 1] * h / 4;
+            }
+
+            float[] expanded = new float[8];
+
+            for (int i = 0; i < 4; i++) {
+                float px = normalized[i * 2] * w;
+                float py = normalized[i * 2 + 1] * h;
+                float dx = px - cx;
+                float dy = py - cy;
+                float len = (float) Math.sqrt(dx * dx + dy * dy);
+
+                if (len > 1) {
+                    px += dx / len * CODE_PADDING_PX;
+                    py += dy / len * CODE_PADDING_PX;
+                }
+
+                expanded[i * 2] = px / w;
+                expanded[i * 2 + 1] = py / h;
+            }
+
+            return expanded;
         }
 
         // Рамка наводки: квадрат ~70% меньшей стороны по центру (нормированно).
@@ -72,7 +154,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
             if (w <= 0 || h <= 0)
                 return null;
 
-            float half = Math.min(w, h) * 0.35f;
+            float half = Math.min(w, h) * 0.455f;
             float left = (w / 2 - half) / w;
             float right = (w / 2 + half) / w;
             float top = (h / 2 - half) / h;
@@ -101,7 +183,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
                     settled = false;
             }
 
-            paint.setColor(hasCode ? 0xFF00E676 : 0xCCFFFFFF);
+            paint.setColor(hasCode ? 0xFFFFD600 : 0xCCFFFFFF);
 
             float w = getWidth();
             float h = getHeight();
@@ -168,8 +250,20 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
     }
 
     private void showInternal() {
-        root = new FrameLayout(activity);
+        // Кнопка "Назад" закрывает сканер, не доходя до приложения.
+        root = new FrameLayout(activity) {
+            @Override
+            public boolean dispatchKeyEvent(KeyEvent event) {
+                if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+                    if (event.getAction() == KeyEvent.ACTION_UP)
+                        onClose();
+                    return true;
+                }
+                return super.dispatchKeyEvent(event);
+            }
+        };
         root.setBackgroundColor(Color.BLACK);
+        root.setFocusableInTouchMode(true);
 
         SurfaceView surfaceView = new SurfaceView(activity);
         surfaceView.getHolder().setFixedSize(BUFFER_WIDTH, BUFFER_HEIGHT);
@@ -200,7 +294,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
 
         // Уголки: рамка наводки в покое, сопровождение кода при находке.
-        markerView = new MarkerView(activity, dp(4), dp(6));
+        markerView = new MarkerView(activity, dp(4), dp(9));
         root.addView(markerView,
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
 
@@ -249,6 +343,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
 
         activity.addContentView(root, new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.requestFocus();
     }
 
     private void hideInternal() {
