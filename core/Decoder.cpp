@@ -39,6 +39,8 @@ DecodeResult DecodeLuminanceEx(const uint8_t* data, int width, int height)
 
 		if (first) {
 
+			result.firstText = ZXing::ToString(barcode.format()) + "|" + barcode.text();
+
 			// Нормированные углы первого кода — для маркеров на превью.
 			const ZXing::PointI corners[4] = {position.topLeft(), position.topRight(),
 				position.bottomRight(), position.bottomLeft()};

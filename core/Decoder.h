@@ -8,6 +8,7 @@ namespace bsz {
 // Результат распознавания кадра.
 struct DecodeResult {
 	std::string json; // {"found":N,"barcodes":[{"format","text","points":[[x,y]x4]},...]}
+	std::string firstText; // формат+текст первого кода — ключ дедупликации
 	int found = 0;
 	float points[8] = {}; // нормированные углы первого кода (для маркеров на превью)
 };

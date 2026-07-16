@@ -149,7 +149,7 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 	}
 
 	const bool started = bsz::android::CameraStart(g_previewWindow, kFrameWidth, kFrameHeight,
-		[](const std::string& json, const float* points) {
+		[](const std::string& json) {
 
 			{
 				std::lock_guard<std::mutex> lock(g_ownerMutex);
@@ -159,36 +159,50 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 
 			}
 
-			// Маркеры по углам найденного кода (координаты кадра -> вида).
-			std::array<float, 8> view{};
-
-			for (int i = 0; i < 4; ++i)
-				bsz::android::CameraFrameToView(points[i * 2], points[i * 2 + 1],
-					view[i * 2], view[i * 2 + 1]);
-
-			JNIEnv* env = Env();
-
-			if (env)
-				RunOnUiThread(env, [view] {
-
-					JNIEnv* uiEnv = Env();
-
-					if (!uiEnv)
-						return;
-
-					const jfloatArray arr = uiEnv->NewFloatArray(8);
-					uiEnv->SetFloatArrayRegion(arr, 0, 8, view.data());
-					uiEnv->CallStaticVoidMethod(g_overlayCls, g_overlayShowMarkers, arr);
-					ClearPendingException(uiEnv, "showMarkers");
-					uiEnv->DeleteLocalRef(arr);
-
-				});
-
 			if (g_autoClose) {
-				// Даём маркерам мелькнуть перед закрытием экрана.
+				// Даём рамке вокруг кода мелькнуть перед закрытием экрана.
 				std::this_thread::sleep_for(std::chrono::milliseconds(400));
 				bsz::android::StopScanning();
 			}
+
+		},
+		[](const float* points) {
+
+			// Сопровождение кода рамкой: координаты кадра -> вида; nullptr — погасить.
+			const bool visible = points != nullptr;
+			std::array<float, 8> view{};
+
+			if (visible)
+				for (int i = 0; i < 4; ++i)
+					bsz::android::CameraFrameToView(points[i * 2], points[i * 2 + 1],
+						view[i * 2], view[i * 2 + 1]);
+
+			JNIEnv* env = Env();
+
+			if (!env)
+				return;
+
+			RunOnUiThread(env, [view, visible] {
+
+				JNIEnv* uiEnv = Env();
+
+				if (!uiEnv)
+					return;
+
+				jfloatArray arr = nullptr;
+
+				if (visible) {
+					arr = uiEnv->NewFloatArray(8);
+					uiEnv->SetFloatArrayRegion(arr, 0, 8, view.data());
+				}
+
+				uiEnv->CallStaticVoidMethod(g_overlayCls, g_overlayShowMarkers, arr);
+				ClearPendingException(uiEnv, "showMarkers");
+
+				if (arr)
+					uiEnv->DeleteLocalRef(arr);
+
+			});
 
 		});
 

@@ -9,17 +9,21 @@ struct ANativeWindow;
 
 namespace bsz::android {
 
-// Колбэк с JSON результата распознавания ({"found":..,"barcodes":[..]}) и
-// нормированными углами первого кода в координатах кадра анализа (8 float).
-// Вызывается из потока обработки кадров.
-using ScanEmitFn = std::function<void(const std::string& jsonUtf8, const float* points8)>;
+// Колбэк с JSON результата распознавания ({"found":..,"barcodes":[..]}).
+// Вызывается из потока обработки кадров (с дедупликацией повторов).
+using ScanEmitFn = std::function<void(const std::string& jsonUtf8)>;
+
+// Колбэк сопровождения: углы первого кода в нормированных координатах кадра
+// (8 float) на каждом распознанном кадре; nullptr — код ушёл из кадра.
+using MarkerFn = std::function<void(const float* points8OrNull)>;
 
 // Открывает заднюю камеру (NDK Camera2 через dlopen, требует API 24+) и
 // запускает preview в переданную поверхность + поток кадров YUV в zxing.
 // width/height — верхняя граница разрешения потока анализа: берётся лучший
 // поддерживаемый камерой YUV-размер, не превышающий её.
 // previewWindow должен жить до CameraStop (владение остаётся у вызывающего).
-bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn emit);
+bool CameraStart(ANativeWindow* previewWindow, int width, int height,
+	ScanEmitFn emit, MarkerFn markers);
 
 // Останавливает съёмку и освобождает ресурсы камеры. Безопасно вызывать повторно.
 void CameraStop();

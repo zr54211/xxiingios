@@ -162,6 +162,8 @@ struct CameraState {
 std::mutex g_mutex;
 CameraState g_cam;
 bsz::android::ScanEmitFn g_emit;
+bsz::android::MarkerFn g_markers;
+bool g_markersShown = false;
 std::atomic<bool> g_running{false};
 
 // Характеристики выбранной камеры (читаются при старте).
@@ -176,7 +178,7 @@ bool g_flashAvailable = false;
 std::atomic<uint64_t> g_focusGeneration{0};
 
 // Подавление повторной отправки того же результата при непрерывном сканировании.
-std::string g_lastJson;
+std::string g_lastText;
 std::chrono::steady_clock::time_point g_lastEmitAt;
 
 void OnDeviceDisconnected(void* /*ctx*/, ACameraDevice* /*device*/)
@@ -242,21 +244,35 @@ void OnImageAvailable(void* /*ctx*/, AImageReader* reader)
 
 	const bsz::DecodeResult decoded = bsz::DecodeLuminanceEx(buffer.data(), width, height);
 
+	// Сопровождение: рамка обновляется каждым кадром и гаснет без кода.
+	if (g_markers) {
+
+		if (decoded.found > 0) {
+			g_markers(decoded.points);
+			g_markersShown = true;
+		} else if (g_markersShown) {
+			g_markers(nullptr);
+			g_markersShown = false;
+		}
+
+	}
+
 	if (decoded.found == 0)
 		return;
 
-	// Один и тот же код не чаще раза в 2 секунды.
+	// Один и тот же код не чаще раза в 2 секунды (по тексту: координаты
+	// углов в соседних кадрах дрожат, JSON целиком сравнивать нельзя).
 	const auto now = std::chrono::steady_clock::now();
 
-	if (decoded.json == g_lastJson && now - g_lastEmitAt < std::chrono::seconds(2))
+	if (decoded.firstText == g_lastText && now - g_lastEmitAt < std::chrono::seconds(2))
 		return;
 
-	g_lastJson = decoded.json;
+	g_lastText = decoded.firstText;
 	g_lastEmitAt = now;
 	LOGI("Barcode found: %s", decoded.json.c_str());
 
 	if (g_emit)
-		g_emit(decoded.json, decoded.points);
+		g_emit(decoded.json);
 }
 
 // Выбирает размер YUV-потока анализа: максимальная площадь, не превышающая
@@ -421,7 +437,8 @@ void TeardownLocked()
 
 namespace bsz::android {
 
-bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn emit)
+bool CameraStart(ANativeWindow* previewWindow, int width, int height,
+	ScanEmitFn emit, MarkerFn markers)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 
@@ -434,7 +451,9 @@ bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn
 		return false;
 
 	g_emit = std::move(emit);
-	g_lastJson.clear();
+	g_markers = std::move(markers);
+	g_markersShown = false;
+	g_lastText.clear();
 
 	g_cam.manager = g_api.ManagerCreate();
 
@@ -531,6 +550,7 @@ void CameraStop()
 	std::lock_guard<std::mutex> lock(g_mutex);
 	TeardownLocked();
 	g_emit = nullptr;
+	g_markers = nullptr;
 	LOGI("Camera stopped");
 }
 
