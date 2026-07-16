@@ -243,6 +243,49 @@ void OnImageAvailable(void* /*ctx*/, AImageReader* reader)
 		g_emit(json);
 }
 
+// Выбирает размер YUV-потока анализа: максимальная площадь, не превышающая
+// targetW x targetH (плотные QR требуют разрешения повыше, но без фанатизма —
+// каждый кадр прогоняется через zxing целиком).
+bool PickAnalysisSize(const char* cameraId, int targetW, int targetH, int& outW, int& outH)
+{
+	ACameraMetadata* meta = nullptr;
+
+	if (g_api.GetCharacteristics(g_cam.manager, cameraId, &meta) != ACAMERA_OK)
+		return false;
+
+	ACameraMetadata_const_entry entry{};
+	const bool ok = g_api.MetadataGetConstEntry(meta,
+		ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &entry) == ACAMERA_OK;
+
+	int64_t bestArea = 0;
+	const int64_t maxArea = static_cast<int64_t>(targetW) * targetH;
+
+	if (ok) {
+
+		// Записи по 4 значения: format, width, height, isInput.
+		for (uint32_t i = 0; i + 3 < entry.count; i += 4) {
+
+			if (entry.data.i32[i] != AIMAGE_FORMAT_YUV_420_888 || entry.data.i32[i + 3] != 0)
+				continue;
+
+			const int w = entry.data.i32[i + 1];
+			const int h = entry.data.i32[i + 2];
+			const int64_t area = static_cast<int64_t>(w) * h;
+
+			if (area > bestArea && area <= maxArea) {
+				bestArea = area;
+				outW = w;
+				outH = h;
+			}
+
+		}
+
+	}
+
+	g_api.MetadataFree(meta);
+	return bestArea > 0;
+}
+
 // Выбирает заднюю камеру; при неудаче возвращает пустую строку.
 std::string PickBackCamera()
 {
@@ -358,6 +401,14 @@ bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn
 		return false;
 	}
 
+	// width/height трактуются как максимум потока анализа; берём лучший
+	// поддерживаемый размер камеры, не превышающий его.
+	int analysisW = 1280;
+	int analysisH = 720;
+
+	if (!PickAnalysisSize(cameraId.c_str(), width, height, analysisW, analysisH))
+		LOGE("PickAnalysisSize failed, falling back to %dx%d", analysisW, analysisH);
+
 	static ACameraDevice_StateCallbacks deviceCallbacks = {
 		nullptr, OnDeviceDisconnected, OnDeviceError};
 
@@ -368,9 +419,9 @@ bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn
 		return false;
 	}
 
-	if (g_api.ImageReaderNew(width, height, AIMAGE_FORMAT_YUV_420_888, 4, &g_cam.reader)
+	if (g_api.ImageReaderNew(analysisW, analysisH, AIMAGE_FORMAT_YUV_420_888, 4, &g_cam.reader)
 			!= AMEDIA_OK || !g_cam.reader) {
-		LOGE("AImageReader_new(%dx%d) failed", width, height);
+		LOGE("AImageReader_new(%dx%d) failed", analysisW, analysisH);
 		TeardownLocked();
 		return false;
 	}
@@ -419,7 +470,7 @@ bool CameraStart(ANativeWindow* previewWindow, int width, int height, ScanEmitFn
 	}
 
 	g_running.store(true);
-	LOGI("Camera started (%dx%d)", width, height);
+	LOGI("Camera started (analysis %dx%d)", analysisW, analysisH);
 	return true;
 }
 

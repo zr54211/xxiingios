@@ -20,8 +20,10 @@
 
 namespace {
 
-constexpr int kFrameWidth = 1280; // = ScannerOverlay.BUFFER_WIDTH
-constexpr int kFrameHeight = 720;
+// Верхняя граница разрешения потока анализа (реальный размер выбирается
+// из поддерживаемых камерой). Плотные QR при 720p не читаются стабильно.
+constexpr int kFrameWidth = 1920;
+constexpr int kFrameHeight = 1080;
 
 JavaVM* g_vm = nullptr;
 jobject g_activity = nullptr; // GlobalRef на Activity 1С

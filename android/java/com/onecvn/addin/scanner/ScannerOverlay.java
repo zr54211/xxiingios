@@ -3,7 +3,10 @@ package com.onecvn.addin.scanner;
 import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.os.Build;
+import android.util.DisplayMetrics;
+import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -56,11 +59,25 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
 
     private void showInternal() {
         root = new FrameLayout(activity);
+        root.setBackgroundColor(Color.BLACK);
+
         SurfaceView surfaceView = new SurfaceView(activity);
         surfaceView.getHolder().setFixedSize(BUFFER_WIDTH, BUFFER_HEIGHT);
         surfaceView.getHolder().addCallback(this);
-        root.addView(surfaceView, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Вид с пропорциями кадра камеры (система поворачивает буфер в портрет,
+        // поэтому аспект вида — 9:16), остальное закрывает чёрный letterbox.
+        DisplayMetrics metrics = activity.getResources().getDisplayMetrics();
+        int viewWidth = metrics.widthPixels;
+        int viewHeight = viewWidth * BUFFER_WIDTH / BUFFER_HEIGHT;
+
+        if (viewHeight > metrics.heightPixels) {
+            viewHeight = metrics.heightPixels;
+            viewWidth = viewHeight * BUFFER_HEIGHT / BUFFER_WIDTH;
+        }
+
+        root.addView(surfaceView,
+            new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
         activity.addContentView(root, new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
