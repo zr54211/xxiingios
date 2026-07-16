@@ -47,6 +47,7 @@ BarcodeScannerAddIn* g_owner = nullptr;
 // Настройки текущего сеанса сканирования (из НастройкиJSON).
 bool g_autoClose = true;
 bool g_torchOnStart = false;
+bool g_torchOn = false; // текущее состояние для кнопки на оверлее
 
 // Примитивный разбор булева поля плоского JSON настроек.
 bool JsonFlag(const std::string& json, const char* key, bool defaultValue)
@@ -163,14 +164,22 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 		return;
 	}
 
-	if (g_torchOnStart)
-		bsz::android::CameraSetTorch(true);
+	g_torchOn = g_torchOnStart && bsz::android::CameraSetTorch(true);
 }
 
 // Тап по превью (UI-поток): фокусировка в точке.
 void JNICALL NativeOnTap(JNIEnv* /*env*/, jclass /*cls*/, jfloat nx, jfloat ny)
 {
 	bsz::android::CameraFocusAt(nx, ny);
+}
+
+// Кнопка фонарика на оверлее (UI-поток): переключение.
+void JNICALL NativeOnTorch(JNIEnv* /*env*/, jclass /*cls*/)
+{
+	g_torchOn = !g_torchOn && bsz::android::CameraSetTorch(true);
+
+	if (!g_torchOn)
+		bsz::android::CameraSetTorch(false);
 }
 
 // Кнопка закрытия на оверлее (UI-поток).
@@ -218,10 +227,11 @@ bool EnsureJavaPart(JNIEnv* env, IAndroidComponentHelper* helper)
 		{"onSurface", "(Landroid/view/Surface;)V", reinterpret_cast<void*>(&NativeOnSurface)},
 		{"onTap", "(FF)V", reinterpret_cast<void*>(&NativeOnTap)},
 		{"onClose", "()V", reinterpret_cast<void*>(&NativeOnClose)},
+		{"onTorch", "()V", reinterpret_cast<void*>(&NativeOnTorch)},
 	};
 
 	if (env->RegisterNatives(bridge, bridgeMethods, 1) != JNI_OK
-			|| env->RegisterNatives(overlay, overlayMethods, 3) != JNI_OK
+			|| env->RegisterNatives(overlay, overlayMethods, 4) != JNI_OK
 			|| ClearPendingException(env, "RegisterNatives")) {
 		LOGE("RegisterNatives failed");
 		return false;

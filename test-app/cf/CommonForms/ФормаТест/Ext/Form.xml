@@ -40,10 +40,6 @@
 					<CommandName>Form.Command.Скрыть</CommandName>
 					<ExtendedTooltip name="СкрытьРасширеннаяПодсказка" id="11"/>
 				</Button>
-				<Button name="Фонарик" id="20">
-					<CommandName>Form.Command.Фонарик</CommandName>
-					<ExtendedTooltip name="ФонарикРасширеннаяПодсказка" id="21"/>
-				</Button>
 			</ChildItems>
 		</UsualGroup>
 		<InputField name="Лог" id="12">
@@ -121,15 +117,6 @@
 				</v8:item>
 			</Title>
 			<Action>СкрытьНажатие</Action>
-		</Command>
-		<Command name="Фонарик" id="22">
-			<Title>
-				<v8:item>
-					<v8:lang>ru</v8:lang>
-					<v8:content>Фонарик</v8:content>
-				</v8:item>
-			</Title>
-			<Action>ФонарикНажатие</Action>
 		</Command>
 	</Commands>
 </Form>

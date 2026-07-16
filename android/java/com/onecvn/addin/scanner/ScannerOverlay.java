@@ -132,6 +132,27 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
         closeParams.setMargins(0, dp(24), dp(16), 0);
         root.addView(close, closeParams);
 
+        // Кнопка фонарика (слева сверху, симметрично кнопке закрытия).
+        TextView torch = new TextView(activity);
+        torch.setText("🔦");
+        torch.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        torch.setPadding(dp(14), dp(12), dp(14), dp(12));
+        GradientDrawable torchShape = new GradientDrawable();
+        torchShape.setColor(0x66000000);
+        torchShape.setCornerRadius(dp(24));
+        torch.setBackground(torchShape);
+        torch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                onTorch();
+            }
+        });
+        FrameLayout.LayoutParams torchParams = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP | Gravity.START);
+        torchParams.setMargins(dp(16), dp(24), 0, 0);
+        root.addView(torch, torchParams);
+
         activity.addContentView(root, new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
@@ -162,4 +183,6 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
     private static native void onTap(float nx, float ny);
 
     private static native void onClose();
+
+    private static native void onTorch();
 }
