@@ -1,0 +1,55 @@
+# Сборка iOS-части ВК без Mac: статическая libBarcodeScannerZXing.a (arm64).
+# Результат — артефакт, который make-zip.ps1 ждёт в build-ios/ (кладётся руками
+# после скачивания). Сборку IPA делает сборщик 1С, здесь только компиляция .a.
+name: iOS static library
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'core/**'
+      - 'ios/**'
+      - 'deps/**'
+      - 'vendor/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/ios-lib.yml'
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (CMake, iOS arm64)
+        run: >
+          cmake -B build-ios -G Ninja
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-ios
+
+      - name: Merge with zxing-cpp into single .a
+        # Сборщик 1С линкует один self-contained файл — zxing въезжает внутрь.
+        run: |
+          ZXING_A=$(find build-ios -name 'libZXing*.a' | head -1)
+          echo "zxing static lib: $ZXING_A"
+          libtool -static -o build-ios/merged.a build-ios/libBarcodeScannerZXing.a "$ZXING_A"
+          mv -f build-ios/merged.a build-ios/libBarcodeScannerZXing.a
+
+      - name: Verify arch and Native API exports
+        run: |
+          lipo -info build-ios/libBarcodeScannerZXing.a
+          nm -gU build-ios/libBarcodeScannerZXing.a | grep -E "GetClassNames|GetClassObject|DestroyObject|SetPlatformCapabilities"
+          ls -la build-ios/libBarcodeScannerZXing.a
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libBarcodeScannerZXing-ios-arm64
+          path: build-ios/libBarcodeScannerZXing.a
+          if-no-files-found: error
