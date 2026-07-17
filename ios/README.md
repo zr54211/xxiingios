@@ -1,23 +1,39 @@
-# iOS-слой (этап 3)
+# iOS-слой
 
-Здесь появится платформенная часть для iOS (Objective-C++):
+Состояние: **этап 0 написан** — `IosScanner.mm` показывает полноэкранный оверлей
+поверх окна 1С (key window: сцены iOS 13+ и классический путь), кнопка «Закрыть»
+шлёт `ScanCancelled` в BSL. Камеры ещё нет — это прототип риска №1
+(свой UI из ВК на iOS, прецедентов не найдено). Проверка — первой сборкой IPA.
 
-- **ScannerViewController**: полноэкранный сканер — AVFoundation
-  (`AVCaptureSession`, preview layer, video output 1080p+), continuous autofocus,
-  tap-to-focus, зум, фонарик. Y-плоскость `CVPixelBuffer` → `bsz::DecodeLuminance`.
-- Показ поверх окна 1С: `rootViewController.presentViewController` из главного
-  потока; результат → `BarcodeScannerAddIn::EmitScanResult()`.
+Дальше (см. `REQUIREMENTS.md`):
 
-## Сборка (после появления кода)
+1. **Этап 1** — камера: `AVCaptureSession` 1080p, Y-плоскость `CVPixelBuffer` →
+   `bsz::DecodeLuminanceEx`, `ScanResult` в BSL.
+2. **Этап 2** — UX-паритет с Android: уголки-сопровождение, фонарик,
+   tap-to-focus, autoClose.
 
-Статическая библиотека arm64 через CMake + Xcode toolchain
-(`cmake -G Xcode -DCMAKE_SYSTEM_NAME=iOS ...`), линкуется в приложение
-сборщиком мобильных приложений 1С.
+Если этап 0 на устройстве провалится — режим Б: `РаспознатьИзображение` по фото
+от `СредстваМультимедиа.СделатьФотоснимок`, без своего UI.
 
-## Риск №1 проекта
+## Сборка (без Mac)
 
-В отличие от Android, у платформы нет хелпера для доступа к UI на iOS, и
-прецедентов 1С-ВК с собственным экраном не найдено. **Первая задача этапа —
-минимальная проба: показать пустой ViewController из ВК в собранном мобильном
-приложении.** Если проба провалится — на iOS остаётся режим B
-(`РаспознатьИзображение` по фото от `СредстваМультимедиа.СделатьФотоснимок`).
+GitHub Actions `.github/workflows/ios-lib.yml` (репо `zr54211/xxiingios`,
+раннер macos-15/Xcode 16 — libc++ Xcode 15 не собирает C++20-код zxing-cpp):
+CMake Ninja `-DCMAKE_SYSTEM_NAME=iOS`, arm64, target 11.0 → `libtool -static`
+склеивает с zxing-cpp → артефакт `libBarcodeScannerZXing-ios-arm64`.
+Скачанный `.a` кладётся в `build-ios/` — его ждёт `package/make-zip.ps1`.
+
+Факты механизма ВК iOS (разведка по prjios.zip 8.3.27.70):
+
+- линковка в приложение статическая, у проекта платформы `-all_load` —
+  библиотека въезжает целиком;
+- загрузчик (`addncpp`) ищет **стандартные** имена `GetClassNames` /
+  `GetClassObject` / `DestroyObject` / `SetPlatformCapabilities` — без
+  суффиксов, наш `exports.cpp` общий для всех ОС;
+- следствие: две Native API ВК в одном приложении не уживутся
+  (дубль символов) — для кассы не актуально.
+
+## Логи с устройства
+
+`NSLog` с префиксом `BarcodeScannerZXing`; на Windows смотреть через
+`idevicesyslog` (libimobiledevice) — аналог `adb logcat`.
