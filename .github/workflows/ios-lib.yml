@@ -17,9 +17,11 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-15 = Xcode 16.x: libc++ Xcode 15 не собирает C++20-код zxing-cpp
+    # (construct_at, LocalGrid.cpp).
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
