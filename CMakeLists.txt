@@ -49,6 +49,16 @@ if(WIN32)
     target_sources(${PROJECT_NAME} PRIVATE core/exports.def)
 endif()
 
+if(IOS)
+    enable_language(OBJCXX)
+    target_sources(${PROJECT_NAME} PRIVATE
+        ios/IosScanner.mm
+        ios/IosScanner.h)
+    target_include_directories(${PROJECT_NAME} PRIVATE ios)
+    # UIKit статической библиотеке не линкуется — приедет из приложения платформы.
+    set_source_files_properties(ios/IosScanner.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+endif()
+
 if(ANDROID)
     target_sources(${PROJECT_NAME} PRIVATE
         android/AndroidScanner.cpp

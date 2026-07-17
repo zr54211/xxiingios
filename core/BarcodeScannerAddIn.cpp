@@ -7,6 +7,8 @@
 
 #if defined(__ANDROID__)
 #include "AndroidScanner.h"
+#elif defined(__APPLE__)
+#include "IosScanner.h"
 #endif
 
 namespace {
@@ -82,6 +84,8 @@ void ADDIN_API BarcodeScannerAddIn::Done()
 {
 #if defined(__ANDROID__)
 	bsz::android::StopScanning();
+#elif defined(__APPLE__)
+	bsz::ios::StopScanning();
 #endif
 	m_connect = nullptr;
 	m_memory = nullptr;
@@ -236,6 +240,18 @@ bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* p
 			PostError(u"НачатьСканирование: не удалось запустить сканер (см. logcat BarcodeScannerZXing)");
 			return false;
 		}
+#elif defined(__APPLE__)
+		std::string settings;
+
+		if (paramCount >= 1 && params && TV_VT(&params[0]) == VTYPE_PWSTR && params[0].pwstrVal)
+			settings = bsz::ToUtf8(params[0].pwstrVal, params[0].wstrLen);
+
+		if (bsz::ios::StartScanning(m_connect, this, settings) == bsz::ios::StartScanResult::Started)
+			return true;
+
+		PostError(u"НачатьСканирование: не удалось показать экран сканера"
+			u" (см. системный лог BarcodeScannerZXing)");
+		return false;
 #else
 		PostError(u"НачатьСканирование: экран сканера ещё не реализован для этой ОС");
 		return false;
@@ -263,6 +279,8 @@ bool ADDIN_API BarcodeScannerAddIn::CallAsProc(const long methodNum, tVariant* p
 	case eMethStopScanning:
 #if defined(__ANDROID__)
 		return bsz::android::StopScanning();
+#elif defined(__APPLE__)
+		return bsz::ios::StopScanning();
 #else
 		PostError(u"ЗавершитьСканирование: экран сканера ещё не реализован для этой ОС");
 		return false;
