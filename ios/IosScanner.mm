@@ -374,19 +374,31 @@ static const float kCodePaddingPx = 15.0f;
 	if (connection.isVideoOrientationSupported)
 		connection.videoOrientation = AVCaptureVideoOrientationPortrait;
 
-	// Непрерывный автофокус по центру.
-	if ([_device lockForConfiguration:nil]) {
-
-		if ([_device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus])
-			_device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
-
-		[_device unlockForConfiguration];
-	}
-
 	[self buildOverlayIn:window];
 
+	AVCaptureDevice* device = _device;
 	dispatch_async(_sessionQueue, ^{
 		[self->_session startRunning];
+
+		// Фокус настраивается после старта сессии (до старта настройки
+		// может сбросить первый запуск). Режим сканера: непрерывный AF по
+		// центру, ограничение ближней зоной, без «плавной» фокусировки.
+		if ([device lockForConfiguration:nil]) {
+
+			if (device.isFocusPointOfInterestSupported)
+				device.focusPointOfInterest = CGPointMake(0.5, 0.5);
+
+			if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus])
+				device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
+
+			if (device.isAutoFocusRangeRestrictionSupported)
+				device.autoFocusRangeRestriction = AVCaptureAutoFocusRangeRestrictionNear;
+
+			if (device.isSmoothAutoFocusSupported)
+				device.smoothAutoFocusEnabled = NO;
+
+			[device unlockForConfiguration];
+		}
 	});
 
 	if (g_torchOnStart)
