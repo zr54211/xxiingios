@@ -2,6 +2,15 @@
 
 #include "BarcodeScannerAddIn.h"
 
+#if defined(__APPLE__)
+// Диагностика подключения на устройстве (idevicesyslog): платформа не пишет
+// причин отказа AttachAddIn, единственный сигнал — вызвались ли точки входа.
+#include <os/log.h>
+#define BSZ_TRACE(name) os_log(OS_LOG_DEFAULT, "BarcodeScannerZXing: " name " called")
+#else
+#define BSZ_TRACE(name)
+#endif
+
 // Сборка идёт с visibility=hidden; точки входа Native API должны остаться
 // видимыми (на Windows это делает exports.def).
 // На iOS ВК статически линкуется в исполняемый файл платформы, а его загрузчик
@@ -26,11 +35,14 @@ constexpr WCHAR_T kClassNames[] = {
 
 extern "C" BSZ_EXPORT const WCHAR_T* GetClassNames()
 {
+	BSZ_TRACE("GetClassNames");
 	return kClassNames;
 }
 
 extern "C" BSZ_EXPORT long GetClassObject(const WCHAR_T* /*className*/, IComponentBase** pIntf)
 {
+	BSZ_TRACE("GetClassObject");
+
 	// Компонента экспортирует единственный класс — имя не анализируем.
 	if (!pIntf || *pIntf)
 		return 0;
@@ -41,6 +53,8 @@ extern "C" BSZ_EXPORT long GetClassObject(const WCHAR_T* /*className*/, ICompone
 
 extern "C" BSZ_EXPORT long DestroyObject(IComponentBase** pIntf)
 {
+	BSZ_TRACE("DestroyObject");
+
 	if (!pIntf || !*pIntf)
 		return -1;
 
@@ -51,5 +65,6 @@ extern "C" BSZ_EXPORT long DestroyObject(IComponentBase** pIntf)
 
 extern "C" BSZ_EXPORT AppCapabilities SetPlatformCapabilities(const AppCapabilities /*capabilities*/)
 {
+	BSZ_TRACE("SetPlatformCapabilities");
 	return eAppCapabilitiesLast;
 }
