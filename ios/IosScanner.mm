@@ -368,11 +368,8 @@ static const float kCodePaddingPx = 15.0f;
 
 	[_session addOutput:output];
 
-	// Портретная ориентация кадров: превью и анализ в одной системе координат.
-	AVCaptureConnection* connection = [output connectionWithMediaType:AVMediaTypeVideo];
-
-	if (connection.isVideoOrientationSupported)
-		connection.videoOrientation = AVCaptureVideoOrientationPortrait;
+	// Кадры анализа идут в ориентации сенсора (landscape) без поворота —
+	// zxing находит код в любой ориентации, а точки конвертирует превью-слой.
 
 	[self buildOverlayIn:window];
 
@@ -399,6 +396,18 @@ static const float kCodePaddingPx = 15.0f;
 
 			[device unlockForConfiguration];
 		}
+
+		const CMVideoDimensions dims =
+			CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription);
+		NSLog(@"BarcodeScannerZXing: session started, format %dx%d, preset %@, focusMode %ld",
+			dims.width, dims.height, self->_session.sessionPreset, (long)device.focusMode);
+
+		// Телеметрия фокуса: положение линзы через 2 с после старта.
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+			self->_sessionQueue, ^{
+				NSLog(@"BarcodeScannerZXing: focus telemetry: mode %ld, lens %.3f, adjusting %d",
+					(long)device.focusMode, device.lensPosition, device.isAdjustingFocus);
+			});
 	});
 
 	if (g_torchOnStart)
@@ -587,6 +596,11 @@ static const float kCodePaddingPx = 15.0f;
 			memcpy(_lumBuffer.data() + (size_t)y * width, base + y * stride, width);
 	}
 
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		NSLog(@"BarcodeScannerZXing: first frame %dx%d, stride %zu", width, height, stride);
+	});
+
 	CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
 	if (_lumBuffer.empty())
@@ -605,8 +619,32 @@ static const float kCodePaddingPx = 15.0f;
 			memcpy(points.data(), decoded.points, sizeof(decoded.points));
 
 		BSZMarkerView* markers = _markers;
+		AVCaptureVideoPreviewLayer* preview = _previewLayer;
 		dispatch_async(dispatch_get_main_queue(), ^{
-			[markers setMarkers:(found ? points.data() : NULL)];
+
+			if (!found) {
+				[markers setMarkers:NULL];
+				return;
+			}
+
+			// Точки кадра сенсора -> координаты превью-слоя -> нормированные
+			// координаты вида уголков (его frame совпадает с превью).
+			const CGFloat lw = preview.bounds.size.width;
+			const CGFloat lh = preview.bounds.size.height;
+
+			if (lw <= 0 || lh <= 0)
+				return;
+
+			std::array<float, 8> view{};
+
+			for (int i = 0; i < 4; ++i) {
+				const CGPoint p = [preview pointForCaptureDevicePointOfInterest:
+					CGPointMake(points[i * 2], points[i * 2 + 1])];
+				view[i * 2] = (float)(p.x / lw);
+				view[i * 2 + 1] = (float)(p.y / lh);
+			}
+
+			[markers setMarkers:view.data()];
 		});
 	}
 
