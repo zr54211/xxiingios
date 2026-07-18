@@ -4,8 +4,13 @@
 
 // Сборка идёт с visibility=hidden; точки входа Native API должны остаться
 // видимыми (на Windows это делает exports.def).
+// На iOS ВК статически линкуется в исполняемый файл платформы, а его загрузчик
+// ищет точки входа dlsym-ом: в export trie исполняемого файла ld64 помещает
+// только weak-определения, поэтому weak — единственный способ попасть в trie.
 #if defined(_WIN32)
 #define BSZ_EXPORT
+#elif defined(__APPLE__)
+#define BSZ_EXPORT __attribute__((visibility("default"), weak))
 #else
 #define BSZ_EXPORT __attribute__((visibility("default")))
 #endif
