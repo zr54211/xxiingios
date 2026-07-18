@@ -68,3 +68,39 @@ extern "C" BSZ_EXPORT AppCapabilities SetPlatformCapabilities(const AppCapabilit
 	BSZ_TRACE("SetPlatformCapabilities");
 	return eAppCapabilitiesLast;
 }
+
+#if defined(__APPLE__)
+
+// iOS-загрузчик ВК не использует dlsym: статическая компонента обязана сама
+// зарегистрировать таблицу точек входа через RegisterLibrary при загрузке
+// приложения (шаблон templateMobile комплекта «Технология создания внешних
+// компонент», include/mobile.h). Ключ сопоставления с макетом документирован
+// скупо — регистрируем все разумные варианты имени, реестр это допускает.
+extern "C" void RegisterLibrary(const char* name, const void* reserved, const void* exportTable);
+
+namespace {
+
+const void* kAddinExports[] = {
+	"GetClassObject", (const void*)&GetClassObject,
+	"DestroyObject", (const void*)&DestroyObject,
+	"GetClassNames", (const void*)&GetClassNames,
+	"SetPlatformCapabilities", (const void*)&SetPlatformCapabilities,
+	nullptr
+};
+
+struct BszRegistrar {
+	BszRegistrar()
+	{
+		BSZ_TRACE("RegisterLibrary");
+		RegisterLibrary("BarcodeScannerZXing", nullptr, kAddinExports);
+		RegisterLibrary("libBarcodeScannerZXing", nullptr, kAddinExports);
+		RegisterLibrary("BarcodeScannerZXing.a", nullptr, kAddinExports);
+		RegisterLibrary("libBarcodeScannerZXing.a", nullptr, kAddinExports);
+	}
+};
+
+BszRegistrar g_bszRegistrar;
+
+} // namespace
+
+#endif // __APPLE__
