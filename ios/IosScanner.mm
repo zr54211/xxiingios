@@ -377,19 +377,16 @@ static const float kCodePaddingPx = 15.0f;
 	dispatch_async(_sessionQueue, ^{
 		[self->_session startRunning];
 
-		// Фокус настраивается после старта сессии (до старта настройки
-		// может сбросить первый запуск). Режим сканера: непрерывный AF по
-		// центру, ограничение ближней зоной, без «плавной» фокусировки.
+		// Фокус настраивается после старта сессии (до старта настройки может
+		// сбросить первый запуск). Разовый AutoFocus «пинает» механику, затем
+		// непрерывный AF по центру; без «плавной» фокусировки.
 		if ([device lockForConfiguration:nil]) {
 
 			if (device.isFocusPointOfInterestSupported)
 				device.focusPointOfInterest = CGPointMake(0.5, 0.5);
 
-			if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus])
-				device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
-
-			if (device.isAutoFocusRangeRestrictionSupported)
-				device.autoFocusRangeRestriction = AVCaptureAutoFocusRangeRestrictionNear;
+			if ([device isFocusModeSupported:AVCaptureFocusModeAutoFocus])
+				device.focusMode = AVCaptureFocusModeAutoFocus;
 
 			if (device.isSmoothAutoFocusSupported)
 				device.smoothAutoFocusEnabled = NO;
@@ -397,17 +394,35 @@ static const float kCodePaddingPx = 15.0f;
 			[device unlockForConfiguration];
 		}
 
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+			self->_sessionQueue, ^{
+
+				if ([device lockForConfiguration:nil]) {
+
+					if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus])
+						device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
+
+					[device unlockForConfiguration];
+				}
+
+			});
+
 		const CMVideoDimensions dims =
 			CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription);
-		NSLog(@"BarcodeScannerZXing: session started, format %dx%d, preset %@, focusMode %ld",
-			dims.width, dims.height, self->_session.sessionPreset, (long)device.focusMode);
+		NSLog(@"BarcodeScannerZXing: session started, format %dx%d, preset %@, minZoom %.2f",
+			dims.width, dims.height, self->_session.sessionPreset,
+			(double)device.minAvailableVideoZoomFactor);
 
-		// Телеметрия фокуса: положение линзы через 2 с после старта.
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-			self->_sessionQueue, ^{
-				NSLog(@"BarcodeScannerZXing: focus telemetry: mode %ld, lens %.3f, adjusting %d",
-					(long)device.focusMode, device.lensPosition, device.isAdjustingFocus);
-			});
+		// Телеметрия линзы: первые 10 секунд, раз в 2 секунды.
+		for (int delay = 2; delay <= 10; delay += 2) {
+
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+				self->_sessionQueue, ^{
+					NSLog(@"BarcodeScannerZXing: focus telemetry: mode %ld, lens %.3f, adjusting %d",
+						(long)device.focusMode, device.lensPosition, device.isAdjustingFocus);
+				});
+
+		}
 	});
 
 	if (g_torchOnStart)
