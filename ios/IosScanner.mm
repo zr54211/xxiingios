@@ -324,6 +324,7 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	AVCaptureDevice* _device;
 	AVCaptureVideoPreviewLayer* _previewLayer;
 	BSZMarkerView* _markers;
+	UIWindow* _window;
 	dispatch_queue_t _sessionQueue;
 	dispatch_queue_t _videoQueue;
 	std::vector<uint8_t> _lumBuffer;
@@ -389,7 +390,19 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	// Кадры анализа идут в ориентации сенсора (landscape) без поворота —
 	// zxing находит код в любой ориентации, а точки конвертирует превью-слой.
 
-	[self buildOverlayIn:window];
+	// Собственное окно поверх интерфейса 1С (паритет с отдельной Activity Android):
+	// после доставки штрихкода платформа открывает свои формы, и оверлей в окне
+	// приложения оказался бы под ними до конца паузы автозакрытия.
+	_window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+
+	if (@available(iOS 13.0, *))
+		_window.windowScene = window.windowScene;
+
+	_window.windowLevel = UIWindowLevelAlert + 1;
+	_window.backgroundColor = UIColor.blackColor;
+	_window.hidden = NO;
+
+	[self buildOverlayIn:_window];
 
 	AVCaptureDevice* device = _device;
 	dispatch_async(_sessionQueue, ^{
@@ -489,7 +502,17 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	UIButton* torch = [self overlayButtonWithTitle:@"🔦"];
 	[torch addTarget:self action:@selector(onTorch) forControlEvents:UIControlEventTouchUpInside];
 
-	const CGFloat topInset = window.safeAreaInsets.top + 12;
+	// У только что созданного окна отступы safe area могут быть еще нулевыми.
+	CGFloat safeTop = window.safeAreaInsets.top;
+
+	if (safeTop <= 0) {
+		UIWindow* keyWindow = KeyWindow();
+
+		if (keyWindow)
+			safeTop = keyWindow.safeAreaInsets.top;
+	}
+
+	const CGFloat topInset = safeTop + 12;
 	close.frame = CGRectMake(w - 16 - 48, topInset, 48, 48);
 	close.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
 	torch.frame = CGRectMake(16, topInset, 48, 48);
@@ -597,6 +620,8 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 
 	[self.root removeFromSuperview];
 	self.root = nil;
+	_window.hidden = YES;
+	_window = nil;
 	_session = nil;
 	_device = nil;
 }
