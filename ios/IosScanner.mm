@@ -115,6 +115,7 @@ void CloseScanner(bool emitCancelled);
 static const float kBracketPart = 0.10f;
 static const float kLerp = 0.35f;
 static const float kCodePaddingPx = 15.0f;
+static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect(dp(9)) Android-оверлея
 
 - (instancetype)initWithFrame:(CGRect)frame
 {
@@ -277,9 +278,26 @@ static const float kCodePaddingPx = 15.0f;
 		const float nx = _current[((i + 1) % 4) * 2] * w;
 		const float ny = _current[((i + 1) % 4) * 2 + 1] * h;
 
-		[path moveToPoint:CGPointMake(cx + (px - cx) * kBracketPart, cy + (py - cy) * kBracketPart)];
-		[path addLineToPoint:CGPointMake(cx, cy)];
-		[path addLineToPoint:CGPointMake(cx + (nx - cx) * kBracketPart, cy + (ny - cy) * kBracketPart)];
+		const CGPoint a = CGPointMake(cx + (px - cx) * kBracketPart, cy + (py - cy) * kBracketPart);
+		const CGPoint b = CGPointMake(cx + (nx - cx) * kBracketPart, cy + (ny - cy) * kBracketPart);
+		const float lenA = (float)hypot(a.x - cx, a.y - cy);
+		const float lenB = (float)hypot(b.x - cx, b.y - cy);
+
+		if (lenA < 1 || lenB < 1) {
+			[path moveToPoint:a];
+			[path addLineToPoint:CGPointMake(cx, cy)];
+			[path addLineToPoint:b];
+			continue;
+		}
+
+		// Излом скругляется дугой радиуса kCornerRadiusPx (не больше половины плеча).
+		const float r = MIN(kCornerRadiusPx, 0.5f * MIN(lenA, lenB));
+
+		[path moveToPoint:a];
+		[path addLineToPoint:CGPointMake(cx + (a.x - cx) / lenA * r, cy + (a.y - cy) / lenA * r)];
+		[path addQuadCurveToPoint:CGPointMake(cx + (b.x - cx) / lenB * r, cy + (b.y - cy) / lenB * r)
+			controlPoint:CGPointMake(cx, cy)];
+		[path addLineToPoint:b];
 	}
 
 	[CATransaction begin];
@@ -682,8 +700,9 @@ static const float kCodePaddingPx = 15.0f;
 	if (g_autoClose) {
 		_closing = YES;
 
-		// Дать рамке мелькнуть у кода перед закрытием экрана.
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+		// Дать рамке добежать до кода и задержаться на нем перед закрытием экрана
+		// (0.4 c, как на Android, на глаз закрывается слишком резко).
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
 			dispatch_get_main_queue(), ^{
 				CloseScanner(false);
 			});
