@@ -1,19 +1,39 @@
 # iOS-слой
 
-Состояние: **этап 0 написан** — `IosScanner.mm` показывает полноэкранный оверлей
-поверх окна 1С (key window: сцены iOS 13+ и классический путь), кнопка «Закрыть»
-шлёт `ScanCancelled` в BSL. Камеры ещё нет — это прототип риска №1
-(свой UI из ВК на iOS, прецедентов не найдено). Проверка — первой сборкой IPA.
+Состояние: **готово, проверено на устройстве** (iPhone XS, iOS 18, платформа 8.3.27).
+Полный UX-паритет с Android: камера 1080p, уголки-сопровождение со скруглёнными
+изломами, фонарик, tap-to-focus, автозакрытие с паузой 0.5 с после распознавания.
 
-Дальше (см. `REQUIREMENTS.md`):
+## Механизм подключения статической ВК (главное отличие от Android)
 
-1. **Этап 1** — камера: `AVCaptureSession` 1080p, Y-плоскость `CVPixelBuffer` →
-   `bsz::DecodeLuminanceEx`, `ScanResult` в BSL.
-2. **Этап 2** — UX-паритет с Android: уголки-сопровождение, фонарик,
-   tap-to-focus, autoClose.
+- ВК статически линкуется в исполняемый файл приложения; проект платформы
+  собирается с `-all_load`, библиотека въезжает целиком.
+- Загрузчик ВК **не использует dlsym**: компонента обязана сама
+  зарегистрироваться при загрузке процесса вызовом
+  `RegisterLibrary(имя, 0, таблица)` из статического конструктора
+  (см. `core/exports.cpp`, блок `__APPLE__`; прототип — шаблон templateMobile
+  из комплекта «Технология создания внешних компонент»).
+- Точки входа дополнительно помечены `visibility("default"), weak` — только
+  weak-определения ld64 кладёт в export trie исполняемого файла.
+- Следствие: две Native API ВК в одном приложении не уживутся (единый реестр
+  стандартных имён точек входа).
 
-Если этап 0 на устройстве провалится — режим Б: `РаспознатьИзображение` по фото
-от `СредстваМультимедиа.СделатьФотоснимок`, без своего UI.
+## Архитектура (`IosScanner.mm`)
+
+- `BSZScanner` — сессия `AVCaptureSession` (1920x1080, 420f FullRange),
+  кадры в ориентации сенсора без CPU-поворота; Y-плоскость →
+  `bsz::DecodeLuminanceEx`; маппинг точек кода в координаты экрана через
+  `AVCaptureVideoPreviewLayer pointForCaptureDevicePointOfInterest`.
+- Оверлей живёт в **собственном UIWindow** (`UIWindowLevelAlert + 1`) — формы
+  1С, открываемые сразу после доставки штрихкода, его не перекрывают
+  (паритет с отдельной Activity Android).
+- `BSZMarkerView` — CADisplayLink-анимация уголков (lerp 0.35), скругление
+  изломов дугой 9 pt (паритет с `CornerPathEffect` Android).
+- Автозакрытие: 0.5 с после `ScanResult`; внешний `StopScanning` в это окно
+  **не обрывает** паузу (касса закрывает сканер сразу после обработки
+  штрихкода — экран дозакрывается сам, диалоги показываются после).
+- Ошибки пишутся `NSLog` с префиксом `BarcodeScannerZXing`; смотреть с Windows —
+  `pymobiledevice3 syslog live` или `idevicesyslog`.
 
 ## Сборка (без Mac)
 
@@ -21,19 +41,5 @@ GitHub Actions `.github/workflows/ios-lib.yml` (репо `zr54211/xxiingios`,
 раннер macos-15/Xcode 16 — libc++ Xcode 15 не собирает C++20-код zxing-cpp):
 CMake Ninja `-DCMAKE_SYSTEM_NAME=iOS`, arm64, target 11.0 → `libtool -static`
 склеивает с zxing-cpp → артефакт `libBarcodeScannerZXing-ios-arm64`.
-Скачанный `.a` кладётся в `build-ios/` — его ждёт `package/make-zip.ps1`.
-
-Факты механизма ВК iOS (разведка по prjios.zip 8.3.27.70):
-
-- линковка в приложение статическая, у проекта платформы `-all_load` —
-  библиотека въезжает целиком;
-- загрузчик (`addncpp`) ищет **стандартные** имена `GetClassNames` /
-  `GetClassObject` / `DestroyObject` / `SetPlatformCapabilities` — без
-  суффиксов, наш `exports.cpp` общий для всех ОС;
-- следствие: две Native API ВК в одном приложении не уживутся
-  (дубль символов) — для кассы не актуально.
-
-## Логи с устройства
-
-`NSLog` с префиксом `BarcodeScannerZXing`; на Windows смотреть через
-`idevicesyslog` (libimobiledevice) — аналог `adb logcat`.
+Готовый `.a` кладётся в `iOS/` внутри zip-макета (`arch="universal"`
+в manifest.xml — сборщик 1С кладёт iOS-ВК только в `iOS\Universal\`).

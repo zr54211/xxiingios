@@ -439,28 +439,11 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 
 			});
 
-		const CMVideoDimensions dims =
-			CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription);
-		NSLog(@"BarcodeScannerZXing: session started, format %dx%d, preset %@, minZoom %.2f",
-			dims.width, dims.height, self->_session.sessionPreset,
-			(double)device.minAvailableVideoZoomFactor);
-
-		// Телеметрия линзы: первые 10 секунд, раз в 2 секунды.
-		for (int delay = 2; delay <= 10; delay += 2) {
-
-			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-				self->_sessionQueue, ^{
-					NSLog(@"BarcodeScannerZXing: focus telemetry: mode %ld, lens %.3f, adjusting %d",
-						(long)device.focusMode, device.lensPosition, device.isAdjustingFocus);
-				});
-
-		}
 	});
 
 	if (g_torchOnStart)
 		[self setTorch:YES];
 
-	NSLog(@"BarcodeScannerZXing: scanner started");
 	return YES;
 }
 
@@ -655,11 +638,6 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 			memcpy(_lumBuffer.data() + (size_t)y * width, base + y * stride, width);
 	}
 
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		NSLog(@"BarcodeScannerZXing: first frame %dx%d, stride %zu", width, height, stride);
-	});
-
 	CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
 	if (_lumBuffer.empty())
@@ -718,7 +696,6 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 
 	_lastText = decoded.firstText;
 	_lastEmitAt = now;
-	NSLog(@"BarcodeScannerZXing: barcode found");
 
 	if (BarcodeScannerAddIn* owner = g_owner.load())
 		owner->EmitScanResult(decoded.json);
