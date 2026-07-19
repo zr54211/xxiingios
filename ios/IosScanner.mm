@@ -317,6 +317,7 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 - (BOOL)showAndStart;
 - (void)stop;
 - (BOOL)setTorch:(BOOL)on;
+- (BOOL)isAutoClosePending;
 @end
 
 @implementation BSZScanner {
@@ -734,6 +735,12 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	}
 }
 
+// _closing до вызова stop означает запланированное автозакрытие после распознавания.
+- (BOOL)isAutoClosePending
+{
+	return _closing;
+}
+
 @end
 
 namespace {
@@ -820,6 +827,12 @@ bool StopScanning()
 	g_owner.store(nullptr);
 
 	RunOnMain(^{
+		// Касса закрывает сканер сразу после обработки штрихкода — немедленный
+		// внешний стоп не должен обрывать паузу автозакрытия с рамкой у кода:
+		// экран закроется сам, диалоги вызывающей стороны отобразятся после.
+		if (g_scanner && [g_scanner isAutoClosePending])
+			return;
+
 		CloseScanner(false);
 	});
 
