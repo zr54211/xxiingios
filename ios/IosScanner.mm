@@ -728,7 +728,7 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 
 		// Дать рамке добежать до кода и задержаться на нем перед закрытием экрана
 		// (0.4 c, как на Android, на глаз закрывается слишком резко).
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
 			dispatch_get_main_queue(), ^{
 				CloseScanner(false);
 			});
