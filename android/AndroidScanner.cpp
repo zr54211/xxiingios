@@ -160,6 +160,10 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 			}
 
 			if (g_autoClose) {
+				// Заморозить превью на распознанном кадре: пауза должна показывать
+				// пойманный код, а не живое видео, из-под рамки уехавшее.
+				bsz::android::CameraFreezePreview();
+
 				// Даём рамке вокруг кода мелькнуть перед закрытием экрана.
 				std::this_thread::sleep_for(std::chrono::milliseconds(400));
 				bsz::android::StopScanning();

@@ -703,6 +703,14 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	if (g_autoClose) {
 		_closing = YES;
 
+		// Заморозить превью на распознанном кадре: пауза должна показывать пойманный
+		// код, а не живое видео, из-под маркеров уехавшее. Блок встаёт в main-очередь
+		// следом за обновлением маркеров этого же кадра.
+		AVCaptureVideoPreviewLayer* preview = _previewLayer;
+		dispatch_async(dispatch_get_main_queue(), ^{
+			preview.connection.enabled = NO;
+		});
+
 		// Дать рамке добежать до кода и задержаться на нем перед закрытием экрана
 		// (0.4 c, как на Android, на глаз закрывается слишком резко).
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),

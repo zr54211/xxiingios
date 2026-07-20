@@ -554,6 +554,14 @@ void CameraStop()
 	LOGI("Camera stopped");
 }
 
+// Без захвата g_mutex: emit-коллбек уже выполняется под ним (иначе дедлок),
+// повторный StopRepeating в TeardownLocked безвреден.
+void CameraFreezePreview()
+{
+	if (g_cam.session)
+		g_api.StopRepeating(g_cam.session);
+}
+
 void CameraFrameToView(float fx, float fy, float& nx, float& ny)
 {
 	switch (g_sensorOrientation) {
