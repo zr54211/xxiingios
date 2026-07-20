@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -55,6 +56,48 @@ bool BinarizeProfile(const uint8_t profile[kProfileSamples], int minContrast,
 		bits[i] = profile[i] > threshold;
 
 	return true;
+}
+
+// Поворот кадра на 45° вокруг центра (ближайший сосед, фон белый).
+// Возвращает сторону квадратного буфера результата.
+int RotateFrame45(const uint8_t* data, int width, int height, std::vector<uint8_t>& out)
+{
+	const int side = static_cast<int>((width + height) * 0.7072f) + 2;
+	out.assign(static_cast<size_t>(side) * side, 255);
+
+	const float c = 0.70710678f;
+	const float cxSrc = 0.5f * width;
+	const float cySrc = 0.5f * height;
+	const float cDst = 0.5f * side;
+
+	for (int y = 0; y < side; ++y) {
+		const float ry = y - cDst;
+
+		for (int x = 0; x < side; ++x) {
+			const float rx = x - cDst;
+			const int sx = static_cast<int>(cxSrc + (rx + ry) * c);
+			const int sy = static_cast<int>(cySrc + (ry - rx) * c);
+
+			if (sx >= 0 && sx < width && sy >= 0 && sy < height)
+				out[static_cast<size_t>(y) * side + x]
+					= data[static_cast<size_t>(sy) * width + sx];
+		}
+
+	}
+
+	return side;
+}
+
+// Точка повёрнутого кадра -> координаты исходного (то же преобразование,
+// которым RotateFrame45 выбирает пиксель источника).
+ZXing::PointI MapRotated45ToFrame(ZXing::PointI p, int side, int width, int height)
+{
+	const float c = 0.70710678f;
+	const float rx = p.x - 0.5f * side;
+	const float ry = p.y - 0.5f * side;
+
+	return {static_cast<int>(std::lround(0.5f * width + (rx + ry) * c)),
+		static_cast<int>(std::lround(0.5f * height + (ry - rx) * c))};
 }
 
 // Для линейного кода zxing возвращает не углы символа, а отрезок вдоль линии
@@ -151,7 +194,7 @@ void ExpandLinearCorners(const uint8_t* data, int width, int height, ZXing::Poin
 
 	// Сдвигаем линию с шагом 2 px, допуская до двух шумных строк подряд; дальше
 	// ширины кода не ищем — выше собственной ширины линейные коды не бывают.
-	const auto probe = [&](float dirX, float dirY) {
+	const auto probe = [&](float dirX, float dirY, int& outDrift) {
 		float boundary = 0.0f;
 		int misses = 0;
 		int drift = 0;
@@ -169,6 +212,7 @@ void ExpandLinearCorners(const uint8_t* data, int width, int height, ZXing::Poin
 				boundary = offset;
 				misses = 0;
 				drift = shift;
+				outDrift = drift;
 			} else if (++misses >= 2) {
 				break;
 			}
@@ -178,8 +222,10 @@ void ExpandLinearCorners(const uint8_t* data, int width, int height, ZXing::Poin
 		return boundary;
 	};
 
-	float up = probe(nx, ny);
-	float down = probe(-nx, -ny);
+	int driftUp = 0;
+	int driftDown = 0;
+	float up = probe(nx, ny, driftUp);
+	float down = probe(-nx, -ny, driftDown);
 
 	// Если поиск сорвался целиком (перспектива, блик), рамка не тоньше 12% ширины;
 	// поодиночке стороны не добиваем — нулевая граница означает линию декода
@@ -192,14 +238,48 @@ void ExpandLinearCorners(const uint8_t* data, int width, int height, ZXing::Poin
 		down += pad;
 	}
 
-	corners[0] = {static_cast<int>(std::lround(ax + nx * up)),
-		static_cast<int>(std::lround(ay + ny * up))};
-	corners[1] = {static_cast<int>(std::lround(bx + nx * up)),
-		static_cast<int>(std::lround(by + ny * up))};
-	corners[2] = {static_cast<int>(std::lround(bx - nx * down)),
-		static_cast<int>(std::lround(by - ny * down))};
-	corners[3] = {static_cast<int>(std::lround(ax - nx * down)),
-		static_cast<int>(std::lround(ay - ny * down))};
+	// Линия сканирования zxing всегда осевая, даже когда сам код наклонён;
+	// накопленный дрейф границ даёт наклон штрихов. Рамка — пересечение четырёх
+	// прямых: верхняя и нижняя проходят через найденные границы вдоль края кода,
+	// боковые — через концы линии декода вдоль штрихов. При нулевом дрейфе
+	// вырождается в прежний осевой прямоугольник.
+	const float step = len * (1.0f - 2.0f * inset) / kProfileSamples;
+	const float tx = dx / len;
+	const float ty = dy / len;
+	const float slideUp = -driftUp * step;
+	const float slideDown = -driftDown * step;
+	const float slant = (slideUp - slideDown) / std::max(up + down, 1.0f);
+
+	// Единичные направления: вдоль штрихов и вдоль края кода.
+	float strokeX = nx + tx * slant;
+	float strokeY = ny + ty * slant;
+	const float strokeLen = std::sqrt(strokeX * strokeX + strokeY * strokeY);
+	strokeX /= strokeLen;
+	strokeY /= strokeLen;
+	const float edgeX = -strokeY;
+	const float edgeY = strokeX;
+
+	const float mx = 0.5f * (ax + bx);
+	const float my = 0.5f * (ay + by);
+	const float upX = mx + nx * up + tx * slideUp;
+	const float upY = my + ny * up + ty * slideUp;
+	const float dnX = mx - nx * down + tx * slideDown;
+	const float dnY = my - ny * down + ty * slideDown;
+
+	// Пересечение прямой (P, вдоль края) с прямой (Q, вдоль штрихов);
+	// направления перпендикулярны и единичны — знаменатель всегда ±1.
+	const auto intersect = [&](float px, float py, float qx, float qy, ZXing::PointI& out) {
+		const float wx = qx - px;
+		const float wy = qy - py;
+		const float u = (wx * strokeY - wy * strokeX) / (edgeX * strokeY - edgeY * strokeX);
+		out = {static_cast<int>(std::lround(px + edgeX * u)),
+			static_cast<int>(std::lround(py + edgeY * u))};
+	};
+
+	intersect(upX, upY, ax, ay, corners[0]);
+	intersect(upX, upY, bx, by, corners[1]);
+	intersect(dnX, dnY, bx, by, corners[2]);
+	intersect(dnX, dnY, ax, ay, corners[3]);
 }
 
 } // namespace
@@ -226,7 +306,35 @@ DecodeResult DecodeLuminanceEx(const uint8_t* data, int width, int height)
 		.setTryInvert(true)
 		.setMaxNumberOfSymbols(1);
 
-	const auto barcodes = ZXing::ReadBarcodes(image, options);
+	auto barcodes = ZXing::ReadBarcodes(image, options);
+
+	// Линейный код под ~45° к осям кадра — мёртвая зона: строчный декодер тянет
+	// наклон до ~30°, TryRotate добавляет только 90°. Пустой кадр через раз
+	// прогоняется повёрнутым на 45° — вместе с TryRotate это полный круг
+	// с шагом 45°; «через раз» ограничивает цену на кадрах наведения.
+	static thread_local std::vector<uint8_t> rotated;
+	static thread_local bool rotatedTurn = false;
+	int rotatedSide = 0;
+	bool fromRotated = false;
+
+	if (barcodes.empty()) {
+
+		rotatedTurn = !rotatedTurn;
+
+		if (rotatedTurn) {
+			rotatedSide = RotateFrame45(data, width, height, rotated);
+			const ZXing::ImageView rotatedImage(rotated.data(), rotatedSide, rotatedSide,
+				ZXing::ImageFormat::Lum);
+			barcodes = ZXing::ReadBarcodes(rotatedImage, ZXing::ReaderOptions()
+				.setFormats(ZXing::BarcodeFormat::AllLinear)
+				.setTryRotate(true)
+				.setTryInvert(true)
+				.setMaxNumberOfSymbols(1));
+			fromRotated = !barcodes.empty();
+		}
+
+	}
+
 	result.found = static_cast<int>(barcodes.size());
 
 	std::string json = "{\"found\":" + std::to_string(barcodes.size()) + ",\"barcodes\":[";
@@ -245,9 +353,21 @@ DecodeResult DecodeLuminanceEx(const uint8_t* data, int width, int height)
 
 			result.firstText = ZXing::ToString(barcode.format()) + "|" + barcode.text();
 
-			// У линейных кодов пары углов слиты в отрезок — развести по высоте штрихов.
-			if (barcode.format() <= ZXing::BarcodeFormat::AllLinear)
-				ExpandLinearCorners(data, width, height, pts);
+			// У линейных кодов пары углов слиты в отрезок — развести по высоте
+			// штрихов (для кода из 45°-прохода — в системе повёрнутого кадра,
+			// затем вернуть углы в координаты исходного).
+			if (barcode.format() <= ZXing::BarcodeFormat::AllLinear) {
+
+				if (fromRotated)
+					ExpandLinearCorners(rotated.data(), rotatedSide, rotatedSide, pts);
+				else
+					ExpandLinearCorners(data, width, height, pts);
+
+			}
+
+			if (fromRotated)
+				for (auto& p : pts)
+					p = MapRotated45ToFrame(p, rotatedSide, width, height);
 
 			// Нормированные углы первого кода — для маркеров на превью.
 			for (int i = 0; i < 4; ++i) {

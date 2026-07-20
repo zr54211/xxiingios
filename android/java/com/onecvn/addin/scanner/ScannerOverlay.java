@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -21,6 +22,7 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.TextView;
 
 // Полноэкранный оверлей с SurfaceView для превью камеры, рамкой наводки и
@@ -37,6 +39,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
     private final Activity activity;
     private FrameLayout root;
     private MarkerView markerView;
+    private ImageView frozenView;
 
     // Четыре скруглённых уголка (как у системного сканера Samsung): в покое —
     // широкая рамка наводки по центру, при находке плавно перетекают к углам
@@ -244,6 +247,25 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
             instance.markerView.setPoints(points);
     }
 
+    // Стоп-кадр (ARGB уже в ориентации вида). Вызывается из потока камеры.
+    public static void showFrozenFrame(int[] argb, int width, int height) {
+        final ScannerOverlay overlay = instance;
+
+        if (overlay == null)
+            return;
+
+        final Bitmap bitmap = Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888);
+        overlay.activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (instance != null && instance.frozenView != null) {
+                    instance.frozenView.setImageBitmap(bitmap);
+                    instance.frozenView.setVisibility(View.VISIBLE);
+                }
+            }
+        });
+    }
+
     private int dp(float value) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
             activity.getResources().getDisplayMetrics());
@@ -291,6 +313,14 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
         }
 
         root.addView(surfaceView,
+            new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
+
+        // Стоп-кадр: в паузе после распознавания показывается кадр, на котором код
+        // был найден, — рамка садится на него без рассинхрона с живым превью.
+        frozenView = new ImageView(activity);
+        frozenView.setScaleType(ImageView.ScaleType.FIT_XY);
+        frozenView.setVisibility(View.GONE);
+        root.addView(frozenView,
             new FrameLayout.LayoutParams(viewWidth, viewHeight, Gravity.CENTER));
 
         // Уголки: рамка наводки в покое, сопровождение кода при находке.
@@ -351,6 +381,7 @@ public final class ScannerOverlay implements SurfaceHolder.Callback {
             ((ViewGroup) root.getParent()).removeView(root);
         root = null;
         markerView = null;
+        frozenView = null;
     }
 
     @Override

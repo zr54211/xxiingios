@@ -42,6 +42,7 @@ jmethodID g_overlayHide = nullptr;
 jmethodID g_overlayHasPermission = nullptr;
 jmethodID g_overlayRequestPermission = nullptr;
 jmethodID g_overlayShowMarkers = nullptr;
+jmethodID g_overlayShowFrozen = nullptr;
 
 ANativeWindow* g_previewWindow = nullptr; // живёт между onSurface(create/destroy)
 
@@ -210,6 +211,35 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 
 			});
 
+		},
+		[](const uint8_t* lum, int width, int height) {
+
+			// Стоп-кадр показывается только в паузе автозакрытия; серый ARGB из
+			// Y-плоскости, Bitmap собирает Java-сторона (можно вне UI-потока).
+			if (!g_autoClose)
+				return;
+
+			JNIEnv* env = Env();
+
+			if (!env)
+				return;
+
+			const size_t count = static_cast<size_t>(width) * height;
+			static std::vector<jint> argb;
+			argb.resize(count);
+
+			for (size_t i = 0; i < count; ++i)
+				argb[i] = static_cast<jint>(0xFF000000u | (lum[i] * 0x010101u));
+
+			jintArray arr = env->NewIntArray(static_cast<jsize>(count));
+
+			if (!arr || ClearPendingException(env, "NewIntArray"))
+				return;
+
+			env->SetIntArrayRegion(arr, 0, static_cast<jsize>(count), argb.data());
+			env->CallStaticVoidMethod(g_overlayCls, g_overlayShowFrozen, arr, width, height);
+			ClearPendingException(env, "showFrozenFrame");
+			env->DeleteLocalRef(arr);
 		});
 
 	if (!started) {
@@ -299,9 +329,11 @@ bool EnsureJavaPart(JNIEnv* env, IAndroidComponentHelper* helper)
 	g_overlayRequestPermission = env->GetStaticMethodID(overlay,
 		"requestCameraPermission", "(Landroid/app/Activity;)V");
 	g_overlayShowMarkers = env->GetStaticMethodID(overlay, "showMarkers", "([F)V");
+	g_overlayShowFrozen = env->GetStaticMethodID(overlay, "showFrozenFrame", "([III)V");
 
 	if (!g_bridgePost || !g_overlayShow || !g_overlayHide
 			|| !g_overlayHasPermission || !g_overlayRequestPermission || !g_overlayShowMarkers
+			|| !g_overlayShowFrozen
 			|| ClearPendingException(env, "GetStaticMethodID")) {
 		LOGE("Java part method lookup failed");
 		return false;

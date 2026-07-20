@@ -592,6 +592,37 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	return result;
 }
 
+// Серый стоп-кадр из Y-плоскости кадра декода поверх превью, под маркерами.
+- (void)showFrozenFrame:(NSData*)lum width:(int)width height:(int)height
+{
+	if (!self.root || !_previewLayer || !_markers)
+		return;
+
+	CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)lum);
+
+	if (!provider)
+		return;
+
+	CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+	CGImageRef image = CGImageCreate(width, height, 8, 8, width, gray,
+		kCGBitmapByteOrderDefault, provider, NULL, false, kCGRenderingIntentDefault);
+	CGColorSpaceRelease(gray);
+	CGDataProviderRelease(provider);
+
+	if (!image)
+		return;
+
+	// Кадр сенсора ландшафтный, превью портретное — поворот на 90°.
+	UIImage* uiImage = [UIImage imageWithCGImage:image scale:1.0
+		orientation:UIImageOrientationRight];
+	CGImageRelease(image);
+
+	UIImageView* frozen = [[UIImageView alloc] initWithFrame:_previewLayer.frame];
+	frozen.contentMode = UIViewContentModeScaleToFill;
+	frozen.image = uiImage;
+	[self.root insertSubview:frozen belowSubview:_markers];
+}
+
 - (void)stop
 {
 	_closing = YES;
@@ -713,6 +744,16 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	AVCaptureVideoPreviewLayer* preview = _previewLayer;
 	dispatch_async(dispatch_get_main_queue(), ^{
 		preview.connection.enabled = NO;
+	});
+
+	// Стоп-кадр: превью к моменту заморозки уже ушло вперёд кадра декода
+	// (время распознавания), и рамка садилась бы мимо кода — поверх кладётся
+	// сам кадр декода.
+	NSData* frozenLum = [NSData dataWithBytes:_lumBuffer.data() length:_lumBuffer.size()];
+	const int frozenWidth = width;
+	const int frozenHeight = height;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self showFrozenFrame:frozenLum width:frozenWidth height:frozenHeight];
 	});
 
 	// Дать рамке добежать до кода и задержаться на нем перед закрытием экрана.

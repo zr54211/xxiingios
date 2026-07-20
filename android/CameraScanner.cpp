@@ -163,6 +163,7 @@ std::mutex g_mutex;
 CameraState g_cam;
 bsz::android::ScanEmitFn g_emit;
 bsz::android::MarkerFn g_markers;
+bsz::android::FrozenFrameFn g_frozen;
 bool g_markersShown = false;
 std::atomic<bool> g_running{false};
 
@@ -194,6 +195,44 @@ void OnDeviceError(void* /*ctx*/, ACameraDevice* /*device*/, int error)
 void OnSessionClosed(void* /*ctx*/, ACameraCaptureSession* /*session*/) {}
 void OnSessionReady(void* /*ctx*/, ACameraCaptureSession* /*session*/) {}
 void OnSessionActive(void* /*ctx*/, ACameraCaptureSession* /*session*/) {}
+
+// Поворачивает Y-кадр анализа в ориентацию вида превью (обратное преобразование
+// к CameraFrameToView, попиксельно).
+void RotateLumToView(const uint8_t* src, int width, int height,
+	std::vector<uint8_t>& dst, int& outW, int& outH)
+{
+	const bool swap = g_sensorOrientation == 90 || g_sensorOrientation == 270;
+	outW = swap ? height : width;
+	outH = swap ? width : height;
+	dst.resize(static_cast<size_t>(outW) * outH);
+
+	for (int y = 0; y < outH; ++y) {
+
+		for (int x = 0; x < outW; ++x) {
+			int fx = x;
+			int fy = y;
+
+			switch (g_sensorOrientation) {
+			case 90:
+				fx = y;
+				fy = height - 1 - x;
+				break;
+			case 270:
+				fx = width - 1 - y;
+				fy = x;
+				break;
+			case 180:
+				fx = width - 1 - x;
+				fy = height - 1 - y;
+				break;
+			}
+
+			dst[static_cast<size_t>(y) * outW + x]
+				= src[static_cast<size_t>(fy) * width + fx];
+		}
+
+	}
+}
 
 void OnImageAvailable(void* /*ctx*/, AImageReader* reader)
 {
@@ -270,6 +309,16 @@ void OnImageAvailable(void* /*ctx*/, AImageReader* reader)
 	g_lastText = decoded.firstText;
 	g_lastEmitAt = now;
 	LOGI("Barcode found: %s", decoded.json.c_str());
+
+	// Стоп-кадр для паузы автозакрытия: живое превью к моменту emit уже ушло
+	// вперёд кадра декода, и рамка садилась бы мимо кода.
+	if (g_frozen) {
+		static std::vector<uint8_t> viewLum;
+		int viewW = 0;
+		int viewH = 0;
+		RotateLumToView(buffer.data(), width, height, viewLum, viewW, viewH);
+		g_frozen(viewLum.data(), viewW, viewH);
+	}
 
 	if (g_emit)
 		g_emit(decoded.json);
@@ -438,7 +487,7 @@ void TeardownLocked()
 namespace bsz::android {
 
 bool CameraStart(ANativeWindow* previewWindow, int width, int height,
-	ScanEmitFn emit, MarkerFn markers)
+	ScanEmitFn emit, MarkerFn markers, FrozenFrameFn frozen)
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
 
@@ -452,6 +501,7 @@ bool CameraStart(ANativeWindow* previewWindow, int width, int height,
 
 	g_emit = std::move(emit);
 	g_markers = std::move(markers);
+	g_frozen = std::move(frozen);
 	g_markersShown = false;
 	g_lastText.clear();
 
@@ -551,6 +601,7 @@ void CameraStop()
 	TeardownLocked();
 	g_emit = nullptr;
 	g_markers = nullptr;
+	g_frozen = nullptr;
 	LOGI("Camera stopped");
 }
 
