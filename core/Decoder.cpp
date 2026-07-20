@@ -10,8 +10,10 @@
 
 namespace {
 
-// Число выборок бинарного профиля вдоль линии сканирования.
-constexpr int kProfileSamples = 64;
+// Число выборок бинарного профиля вдоль линии сканирования. Плотность выше
+// числа модулей плотного EAN-13 (95), иначе сопровождение сдвига штрихов
+// на наклонном коде грубее ширины штриха.
+constexpr int kProfileSamples = 128;
 
 // Профиль яркости вдоль отрезка (x0,y0)-(x1,y1); false — отрезок вышел за кадр.
 bool SampleProfile(const uint8_t* data, int width, int height,
@@ -100,31 +102,73 @@ void ExpandLinearCorners(const uint8_t* data, int width, int height, ZXing::Poin
 		ny = -ny;
 	}
 
+	// Наклон и изгиб поверхности (этикетка на бутылке) сдвигают штрихи вдоль
+	// линии с каждым шагом по нормали. Совпадение ищется с допуском ±3 выборки
+	// относительно накопленного дрейфа; сам дрейф ограничен четвертью профиля.
+	const auto matchShifted = [&](const bool bits[kProfileSamples], int drift, int& outShift) {
+		bool ok = false;
+		float best = 0.0f;
+
+		for (int shift = drift - 3; shift <= drift + 3; ++shift) {
+
+			if (shift < -kProfileSamples / 4 || shift > kProfileSamples / 4)
+				continue;
+
+			// Совпадение считается по половинам профиля: у наклонного края линия
+			// выходит за штрихи «клином» с одного конца, и общая доля ещё держится,
+			// когда половина уже вне кода.
+			int same[2] = {};
+			int valid[2] = {};
+
+			for (int i = 0; i < kProfileSamples; ++i) {
+				const int j = i + shift;
+
+				if (j < 0 || j >= kProfileSamples)
+					continue;
+
+				const int half = i < kProfileSamples / 2 ? 0 : 1;
+				++valid[half];
+				same[half] += bits[i] == reference[j] ? 1 : 0;
+			}
+
+			if (valid[0] < kProfileSamples / 4 || valid[1] < kProfileSamples / 4)
+				continue;
+
+			const float score0 = static_cast<float>(same[0]) / valid[0];
+			const float score1 = static_cast<float>(same[1]) / valid[1];
+			const float score = 0.5f * (score0 + score1);
+
+			if (score0 >= 0.70f && score1 >= 0.70f && score >= 0.75f && score > best) {
+				best = score;
+				outShift = shift;
+				ok = true;
+			}
+
+		}
+
+		return ok;
+	};
+
 	// Сдвигаем линию с шагом 2 px, допуская до двух шумных строк подряд; дальше
 	// ширины кода не ищем — выше собственной ширины линейные коды не бывают.
 	const auto probe = [&](float dirX, float dirY) {
 		float boundary = 0.0f;
 		int misses = 0;
+		int drift = 0;
 
 		for (float offset = 2.0f; offset <= len; offset += 2.0f) {
 			bool bits[kProfileSamples];
-			bool match = SampleProfile(data, width, height,
+			int shift = drift;
+			const bool match = SampleProfile(data, width, height,
 					sx + dirX * offset, sy + dirY * offset,
 					ex + dirX * offset, ey + dirY * offset, profile)
-				&& BinarizeProfile(profile, 24, bits);
-
-			if (match) {
-				int same = 0;
-
-				for (int i = 0; i < kProfileSamples; ++i)
-					same += bits[i] == reference[i] ? 1 : 0;
-
-				match = same >= kProfileSamples * 3 / 4;
-			}
+				&& BinarizeProfile(profile, 24, bits)
+				&& matchShifted(bits, drift, shift);
 
 			if (match) {
 				boundary = offset;
 				misses = 0;
+				drift = shift;
 			} else if (++misses >= 2) {
 				break;
 			}

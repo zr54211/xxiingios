@@ -697,27 +697,36 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	_lastText = decoded.firstText;
 	_lastEmitAt = now;
 
-	if (BarcodeScannerAddIn* owner = g_owner.load())
-		owner->EmitScanResult(decoded.json);
+	if (!g_autoClose) {
 
-	if (g_autoClose) {
-		_closing = YES;
+		if (BarcodeScannerAddIn* owner = g_owner.load())
+			owner->EmitScanResult(decoded.json);
 
-		// Заморозить превью на распознанном кадре: пауза должна показывать пойманный
-		// код, а не живое видео, из-под маркеров уехавшее. Блок встаёт в main-очередь
-		// следом за обновлением маркеров этого же кадра.
-		AVCaptureVideoPreviewLayer* preview = _previewLayer;
-		dispatch_async(dispatch_get_main_queue(), ^{
-			preview.connection.enabled = NO;
-		});
-
-		// Дать рамке добежать до кода и задержаться на нем перед закрытием экрана
-		// (0.4 c, как на Android, на глаз закрывается слишком резко).
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-			dispatch_get_main_queue(), ^{
-				CloseScanner(false);
-			});
+		return;
 	}
+
+	_closing = YES;
+
+	// Заморозить превью на распознанном кадре: пауза должна показывать пойманный
+	// код, а не живое видео, из-под маркеров уехавшее. Блок встаёт в main-очередь
+	// следом за обновлением маркеров этого же кадра.
+	AVCaptureVideoPreviewLayer* preview = _previewLayer;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		preview.connection.enabled = NO;
+	});
+
+	// Дать рамке добежать до кода и задержаться на нем перед закрытием экрана.
+	// Событие в 1С уходит только после паузы: обработка штрихкода в BSL заняла бы
+	// главный поток и остановила анимацию рамки на полпути.
+	const std::string json = decoded.json;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+		dispatch_get_main_queue(), ^{
+
+			if (BarcodeScannerAddIn* owner = g_owner.load())
+				owner->EmitScanResult(json);
+
+			CloseScanner(false);
+		});
 }
 
 // _closing до вызова stop означает запланированное автозакрытие после распознавания.

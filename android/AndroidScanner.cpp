@@ -151,6 +151,15 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 	const bool started = bsz::android::CameraStart(g_previewWindow, kFrameWidth, kFrameHeight,
 		[](const std::string& json) {
 
+			if (g_autoClose) {
+				// Заморозить превью на распознанном кадре и дать рамке добежать
+				// по застывшей картинке. Событие в 1С уходит только после паузы:
+				// обработка штрихкода в BSL занимает UI-поток и остановила бы
+				// анимацию рамки на полпути.
+				bsz::android::CameraFreezePreview();
+				std::this_thread::sleep_for(std::chrono::milliseconds(400));
+			}
+
 			{
 				std::lock_guard<std::mutex> lock(g_ownerMutex);
 
@@ -159,15 +168,8 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 
 			}
 
-			if (g_autoClose) {
-				// Заморозить превью на распознанном кадре: пауза должна показывать
-				// пойманный код, а не живое видео, из-под рамки уехавшее.
-				bsz::android::CameraFreezePreview();
-
-				// Даём рамке вокруг кода мелькнуть перед закрытием экрана.
-				std::this_thread::sleep_for(std::chrono::milliseconds(400));
+			if (g_autoClose)
 				bsz::android::StopScanning();
-			}
 
 		},
 		[](const float* points) {
