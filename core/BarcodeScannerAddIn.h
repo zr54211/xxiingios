@@ -18,7 +18,6 @@
 //     ПереключитьФонарик / SetTorch(Включен)             - фонарик во время сканирования
 //     РаспознатьКадр / DecodeFrame(Данные, Ширина, Высота) -> Строка JSON
 //         Данные - ДвоичныеДанные: luminance-буфер (Y-плоскость), Ширина*Высота байт
-//     РаспознатьИзображение / DecodeImage(Данные) -> Строка JSON  (этап B, пока заглушка)
 //   События (через ВнешнееСобытие, Источник "BarcodeScannerZXing"):
 //     "ScanResult"    - Данные: JSON результата распознавания
 //     "ScanCancelled" - пользователь закрыл экран сканера кнопкой
@@ -70,7 +69,6 @@ private:
 		eMethStartScanning = 0,
 		eMethStopScanning,
 		eMethDecodeFrame,
-		eMethDecodeImage,
 		eMethSetTorch,
 		eMethCount
 	};

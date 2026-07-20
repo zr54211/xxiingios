@@ -24,16 +24,15 @@ constexpr std::array<std::array<const char16_t*, 2>, 1> kPropNames = {{
 	{u"Version", u"Версия"},
 }};
 
-constexpr std::array<std::array<const char16_t*, 2>, 5> kMethodNames = {{
+constexpr std::array<std::array<const char16_t*, 2>, 4> kMethodNames = {{
 	{u"StartScanning", u"НачатьСканирование"},
 	{u"StopScanning",  u"ЗавершитьСканирование"},
 	{u"DecodeFrame",   u"РаспознатьКадр"},
-	{u"DecodeImage",   u"РаспознатьИзображение"},
 	{u"SetTorch",      u"ПереключитьФонарик"},
 }};
 
-constexpr long kMethodParamCount[] = {1, 0, 3, 1, 1};
-constexpr bool kMethodHasRet[]     = {false, false, true, true, false};
+constexpr long kMethodParamCount[] = {1, 0, 3, 1};
+constexpr bool kMethodHasRet[]     = {false, false, true, false};
 
 bool EqualNames(const WCHAR_T* left, const char16_t* right)
 {
@@ -321,12 +320,6 @@ bool ADDIN_API BarcodeScannerAddIn::CallAsFunc(const long methodNum, tVariant* r
 		return ReturnString(retValue, json);
 
 	}
-
-	case eMethDecodeImage:
-		// Этап B: декодирование JPEG/PNG (фото от СредстваМультимедиа.СделатьФотоснимок).
-		// Потребуется распаковка изображения (план: stb_image).
-		return ReturnString(retValue,
-			R"({"found":0,"barcodes":[],"error":"not implemented yet"})");
 
 	default:
 		return false;
