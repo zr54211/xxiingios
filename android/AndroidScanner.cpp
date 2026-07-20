@@ -212,10 +212,10 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 			});
 
 		},
-		[](const uint8_t* lum, int width, int height) {
+		[](const uint32_t* argb, int width, int height) {
 
-			// Стоп-кадр показывается только в паузе автозакрытия; серый ARGB из
-			// Y-плоскости, Bitmap собирает Java-сторона (можно вне UI-потока).
+			// Стоп-кадр показывается только в паузе автозакрытия; Bitmap
+			// собирает Java-сторона (можно вне UI-потока).
 			if (!g_autoClose)
 				return;
 
@@ -224,19 +224,13 @@ void JNICALL NativeOnSurface(JNIEnv* env, jclass /*cls*/, jobject surface)
 			if (!env)
 				return;
 
-			const size_t count = static_cast<size_t>(width) * height;
-			static std::vector<jint> argb;
-			argb.resize(count);
-
-			for (size_t i = 0; i < count; ++i)
-				argb[i] = static_cast<jint>(0xFF000000u | (lum[i] * 0x010101u));
-
-			jintArray arr = env->NewIntArray(static_cast<jsize>(count));
+			const jsize count = static_cast<jsize>(static_cast<size_t>(width) * height);
+			jintArray arr = env->NewIntArray(count);
 
 			if (!arr || ClearPendingException(env, "NewIntArray"))
 				return;
 
-			env->SetIntArrayRegion(arr, 0, static_cast<jsize>(count), argb.data());
+			env->SetIntArrayRegion(arr, 0, count, reinterpret_cast<const jint*>(argb));
 			env->CallStaticVoidMethod(g_overlayCls, g_overlayShowFrozen, arr, width, height);
 			ClearPendingException(env, "showFrozenFrame");
 			env->DeleteLocalRef(arr);

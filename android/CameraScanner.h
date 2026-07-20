@@ -17,9 +17,9 @@ using ScanEmitFn = std::function<void(const std::string& jsonUtf8)>;
 // (8 float) на каждом распознанном кадре; nullptr — код ушёл из кадра.
 using MarkerFn = std::function<void(const float* points8OrNull)>;
 
-// Колбэк со стоп-кадром: Y-плоскость кадра, на котором распознан код, уже
-// в ориентации вида превью. Вызывается перед ScanEmitFn того же кадра.
-using FrozenFrameFn = std::function<void(const uint8_t* lum, int width, int height)>;
+// Колбэк со стоп-кадром: цветной ARGB-кадр (0xAARRGGBB), на котором распознан
+// код, уже в ориентации вида превью. Вызывается перед ScanEmitFn того же кадра.
+using FrozenFrameFn = std::function<void(const uint32_t* argb, int width, int height)>;
 
 // Открывает заднюю камеру (NDK Camera2 через dlopen, требует API 24+) и
 // запускает preview в переданную поверхность + поток кадров YUV в zxing.

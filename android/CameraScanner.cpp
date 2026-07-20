@@ -72,6 +72,7 @@ struct CameraApi {
 	decltype(&AImage_getWidth) ImageGetWidth{};
 	decltype(&AImage_getHeight) ImageGetHeight{};
 	decltype(&AImage_getPlaneRowStride) ImageGetPlaneRowStride{};
+	decltype(&AImage_getPlanePixelStride) ImageGetPlanePixelStride{};
 	decltype(&AImage_getPlaneData) ImageGetPlaneData{};
 
 	template <typename Fn>
@@ -140,6 +141,7 @@ struct CameraApi {
 			&& Sym(media, "AImage_getWidth", ImageGetWidth)
 			&& Sym(media, "AImage_getHeight", ImageGetHeight)
 			&& Sym(media, "AImage_getPlaneRowStride", ImageGetPlaneRowStride)
+			&& Sym(media, "AImage_getPlanePixelStride", ImageGetPlanePixelStride)
 			&& Sym(media, "AImage_getPlaneData", ImageGetPlaneData);
 	}
 };
@@ -196,12 +198,16 @@ void OnSessionClosed(void* /*ctx*/, ACameraCaptureSession* /*session*/) {}
 void OnSessionReady(void* /*ctx*/, ACameraCaptureSession* /*session*/) {}
 void OnSessionActive(void* /*ctx*/, ACameraCaptureSession* /*session*/) {}
 
-// Поворачивает Y-кадр анализа в ориентацию вида превью (обратное преобразование
-// к CameraFrameToView, попиксельно).
-void RotateLumToView(const uint8_t* src, int width, int height,
-	std::vector<uint8_t>& dst, int& outW, int& outH)
+// Собирает цветной ARGB стоп-кадр из YUV-кадра декода в ориентации вида превью
+// (обратное преобразование к CameraFrameToView, BT.601 full range). Без цветовых
+// плоскостей (u или v == nullptr) кадр получается серым из одной яркости.
+void BuildFrozenFrameArgb(const uint8_t* lum, int width, int height,
+	const uint8_t* u, int32_t uRowStride, int32_t uPixelStride,
+	const uint8_t* v, int32_t vRowStride, int32_t vPixelStride,
+	std::vector<uint32_t>& dst, int& outW, int& outH)
 {
 	const bool swap = g_sensorOrientation == 90 || g_sensorOrientation == 270;
+	const bool color = u != nullptr && v != nullptr;
 	outW = swap ? height : width;
 	outH = swap ? width : height;
 	dst.resize(static_cast<size_t>(outW) * outH);
@@ -227,8 +233,27 @@ void RotateLumToView(const uint8_t* src, int width, int height,
 				break;
 			}
 
-			dst[static_cast<size_t>(y) * outW + x]
-				= src[static_cast<size_t>(fy) * width + fx];
+			const int yy = lum[static_cast<size_t>(fy) * width + fx];
+			uint32_t pixel;
+
+			if (color) {
+				const int cu = u[static_cast<size_t>(fy / 2) * uRowStride
+					+ static_cast<size_t>(fx / 2) * uPixelStride] - 128;
+				const int cv = v[static_cast<size_t>(fy / 2) * vRowStride
+					+ static_cast<size_t>(fx / 2) * vPixelStride] - 128;
+				int r = yy + ((91881 * cv) >> 16);
+				int g = yy - ((22554 * cu + 46802 * cv) >> 16);
+				int b = yy + ((116130 * cu) >> 16);
+				r = std::min(255, std::max(0, r));
+				g = std::min(255, std::max(0, g));
+				b = std::min(255, std::max(0, b));
+				pixel = 0xFF000000u | (static_cast<uint32_t>(r) << 16)
+					| (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
+			} else {
+				pixel = 0xFF000000u | (static_cast<uint32_t>(yy) * 0x010101u);
+			}
+
+			dst[static_cast<size_t>(y) * outW + x] = pixel;
 		}
 
 	}
@@ -279,6 +304,34 @@ void OnImageAvailable(void* /*ctx*/, AImageReader* reader)
 
 	}
 
+	// Цветовые плоскости — для цветного стоп-кадра при находке: буфер кадра
+	// возвращается камере до декода, позже их взять будет неоткуда.
+	static std::vector<uint8_t> uBuffer;
+	static std::vector<uint8_t> vBuffer;
+	static int32_t uRowStride = 0;
+	static int32_t vRowStride = 0;
+	static int32_t uPixelStride = 1;
+	static int32_t vPixelStride = 1;
+	uint8_t* uPlane = nullptr;
+	uint8_t* vPlane = nullptr;
+	int uLen = 0;
+	int vLen = 0;
+
+	g_api.ImageGetPlaneRowStride(image, 1, &uRowStride);
+	g_api.ImageGetPlaneRowStride(image, 2, &vRowStride);
+	g_api.ImageGetPlanePixelStride(image, 1, &uPixelStride);
+	g_api.ImageGetPlanePixelStride(image, 2, &vPixelStride);
+	g_api.ImageGetPlaneData(image, 1, &uPlane, &uLen);
+	g_api.ImageGetPlaneData(image, 2, &vPlane, &vLen);
+
+	if (uPlane && uLen > 0 && vPlane && vLen > 0) {
+		uBuffer.assign(uPlane, uPlane + uLen);
+		vBuffer.assign(vPlane, vPlane + vLen);
+	} else {
+		uBuffer.clear();
+		vBuffer.clear();
+	}
+
 	g_api.ImageDelete(image);
 
 	const bsz::DecodeResult decoded = bsz::DecodeLuminanceEx(buffer.data(), width, height);
@@ -313,11 +366,14 @@ void OnImageAvailable(void* /*ctx*/, AImageReader* reader)
 	// Стоп-кадр для паузы автозакрытия: живое превью к моменту emit уже ушло
 	// вперёд кадра декода, и рамка садилась бы мимо кода.
 	if (g_frozen) {
-		static std::vector<uint8_t> viewLum;
+		static std::vector<uint32_t> frozenArgb;
 		int viewW = 0;
 		int viewH = 0;
-		RotateLumToView(buffer.data(), width, height, viewLum, viewW, viewH);
-		g_frozen(viewLum.data(), viewW, viewH);
+		BuildFrozenFrameArgb(buffer.data(), width, height,
+			uBuffer.empty() ? nullptr : uBuffer.data(), uRowStride, uPixelStride,
+			vBuffer.empty() ? nullptr : vBuffer.data(), vRowStride, vPixelStride,
+			frozenArgb, viewW, viewH);
+		g_frozen(frozenArgb.data(), viewW, viewH);
 	}
 
 	if (g_emit)

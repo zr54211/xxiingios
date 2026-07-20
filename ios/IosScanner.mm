@@ -64,6 +64,47 @@ void RunOnMain(void (^block)(void))
 		dispatch_async(dispatch_get_main_queue(), block);
 }
 
+// Цветной BGRA-стоп-кадр из YUV 420f (video range, BT.601): Y — уже скопированная
+// плоскость кадра декода, CbCr — из ещё живого буфера камеры (блокировка на
+// вызывающем). CoreImage не используется намеренно: неизвестно, линкует ли его
+// приложение платформы, а CoreGraphics ей нужен заведомо.
+NSData* FrozenFrameBGRA(CVImageBufferRef pixelBuffer, const uint8_t* lum, int width, int height)
+{
+	const uint8_t* cbcr = (const uint8_t*)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
+	const size_t cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
+
+	if (!cbcr || !lum || width <= 0 || height <= 0)
+		return nil;
+
+	NSMutableData* data = [NSMutableData dataWithLength:(NSUInteger)width * height * 4];
+	uint8_t* dst = (uint8_t*)data.mutableBytes;
+
+	for (int y = 0; y < height; ++y) {
+		const uint8_t* row = cbcr + (size_t)(y / 2) * cbcrStride;
+
+		for (int x = 0; x < width; ++x) {
+			const int yy = ((int)lum[(size_t)y * width + x] - 16) * 76284;
+			const int cb = (int)row[(x / 2) * 2] - 128;
+			const int cr = (int)row[(x / 2) * 2 + 1] - 128;
+			int r = (yy + 104595 * cr) >> 16;
+			int g = (yy - 25675 * cb - 53281 * cr) >> 16;
+			int b = (yy + 132201 * cb) >> 16;
+			r = MIN(255, MAX(0, r));
+			g = MIN(255, MAX(0, g));
+			b = MIN(255, MAX(0, b));
+
+			uint8_t* px = dst + ((size_t)y * width + x) * 4;
+			px[0] = (uint8_t)b;
+			px[1] = (uint8_t)g;
+			px[2] = (uint8_t)r;
+			px[3] = 255;
+		}
+
+	}
+
+	return data;
+}
+
 UIWindow* KeyWindow()
 {
 	UIApplication* app = UIApplication.sharedApplication;
@@ -592,21 +633,22 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	return result;
 }
 
-// Серый стоп-кадр из Y-плоскости кадра декода поверх превью, под маркерами.
-- (void)showFrozenFrame:(NSData*)lum width:(int)width height:(int)height
+// Цветной стоп-кадр (BGRA-буфер кадра декода) поверх превью, под маркерами.
+- (void)showFrozenFrame:(NSData*)bgra width:(int)width height:(int)height
 {
 	if (!self.root || !_previewLayer || !_markers)
 		return;
 
-	CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)lum);
+	CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)bgra);
 
 	if (!provider)
 		return;
 
-	CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
-	CGImageRef image = CGImageCreate(width, height, 8, 8, width, gray,
-		kCGBitmapByteOrderDefault, provider, NULL, false, kCGRenderingIntentDefault);
-	CGColorSpaceRelease(gray);
+	CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+	CGImageRef image = CGImageCreate(width, height, 8, 32, (size_t)width * 4, rgb,
+		kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
+		provider, NULL, false, kCGRenderingIntentDefault);
+	CGColorSpaceRelease(rgb);
 	CGDataProviderRelease(provider);
 
 	if (!image)
@@ -748,13 +790,22 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 
 	// Стоп-кадр: превью к моменту заморозки уже ушло вперёд кадра декода
 	// (время распознавания), и рамка садилась бы мимо кода — поверх кладётся
-	// сам кадр декода.
-	NSData* frozenLum = [NSData dataWithBytes:_lumBuffer.data() length:_lumBuffer.size()];
-	const int frozenWidth = width;
-	const int frozenHeight = height;
-	dispatch_async(dispatch_get_main_queue(), ^{
-		[self showFrozenFrame:frozenLum width:frozenWidth height:frozenHeight];
-	});
+	// сам кадр декода. Цвет собирается здесь же: буфер камеры жив только
+	// до конца этого колбека.
+	NSData* frozenBgra = nil;
+
+	if (CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+		frozenBgra = FrozenFrameBGRA(pixelBuffer, _lumBuffer.data(), width, height);
+		CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+	}
+
+	if (frozenBgra) {
+		const int frozenWidth = width;
+		const int frozenHeight = height;
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self showFrozenFrame:frozenBgra width:frozenWidth height:frozenHeight];
+		});
+	}
 
 	// Дать рамке добежать до кода и задержаться на нем перед закрытием экрана.
 	// Событие в 1С уходит только после паузы: обработка штрихкода в BSL заняла бы
