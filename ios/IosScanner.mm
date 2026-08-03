@@ -486,40 +486,13 @@ static bool g_afDeadKnown = false;
 
 	[self buildOverlayIn:_window];
 
-	AVCaptureDevice* device = _device;
 	dispatch_async(_sessionQueue, ^{
 		[self->_session startRunning];
 
-		// Фокус настраивается после старта сессии (до старта настройки может
-		// сбросить первый запуск). Разовый AutoFocus «пинает» механику, затем
-		// непрерывный AF по центру; без «плавной» фокусировки.
-		if ([device lockForConfiguration:nil]) {
-
-			if (device.isFocusPointOfInterestSupported)
-				device.focusPointOfInterest = CGPointMake(0.5, 0.5);
-
-			if ([device isFocusModeSupported:AVCaptureFocusModeAutoFocus])
-				device.focusMode = AVCaptureFocusModeAutoFocus;
-
-			if (device.isSmoothAutoFocusSupported)
-				device.smoothAutoFocusEnabled = NO;
-
-			[device unlockForConfiguration];
-		}
-
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-			self->_sessionQueue, ^{
-
-				if ([device lockForConfiguration:nil]) {
-
-					if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus])
-						device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
-
-					[device unlockForConfiguration];
-				}
-
-			});
-
+		// Фокус НЕ настраивается: камера остаётся в заводском дефолте
+		// (непрерывный AF по всему кадру, как у приложения «Камера»). Разовый
+		// AutoFocus-«пинок» на полуживом контроллере AF (iPhone XS) обрывал
+		// фокусировку насовсем; наш контрастный AF остаётся фолбэком.
 	});
 
 	if (g_torchOnStart)
@@ -849,7 +822,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 			return;
 		}
 
-		if (CACurrentMediaTime() - _afT0 < 3.0)
+		if (CACurrentMediaTime() - _afT0 < 4.0)
 			return;
 
 		if (!device.isLockingFocusWithCustomLensPositionSupported) {
@@ -857,7 +830,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 			return;
 		}
 
-		NSLog(@"BarcodeScannerZXing af: no focus in 3 s (max sharp %.1f), contrast AF engaged", _afMaxSharp);
+		NSLog(@"BarcodeScannerZXing af: no focus in 4 s (max sharp %.1f), contrast AF engaged", _afMaxSharp);
 		g_afDeadKnown = true;
 		_afEngaged = true;
 		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
