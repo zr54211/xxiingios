@@ -433,7 +433,19 @@ static bool g_afDeadKnown = false;
 		return NO;
 	}
 
-	_device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+	// Диагностика: телефото-модуль вместо wide — у него собственная линза и
+	// собственный контур AF (на iPhone XS контур wide-модуля мёртв в video-сессии,
+	// хотя приложение «Камера» фокусируется).
+	AVCaptureDeviceDiscoverySession* discovery = [AVCaptureDeviceDiscoverySession
+		discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInTelephotoCamera]
+		mediaType:AVMediaTypeVideo
+		position:AVCaptureDevicePositionBack];
+	_device = discovery.devices.firstObject;
+
+	if (_device)
+		NSLog(@"BarcodeScannerZXing af: using telephoto camera module");
+	else
+		_device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
 
 	if (!_device) {
 		NSLog(@"BarcodeScannerZXing: no camera device");
