@@ -363,6 +363,12 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 - (BOOL)isAutoClosePending;
 @end
 
+// Вердикт «штатный AF мёртв» держится до перезапуска приложения: при повторных
+// открытиях сканера контрастный AF включается сразу, без окна наблюдения
+// (линза после наших команд уже не припаркована, и наблюдение дало бы ложный
+// «штатный жив» на её медленной парковке).
+static bool g_afDeadKnown = false;
+
 @implementation BSZScanner {
 	AVCaptureSession* _session;
 	AVCaptureDevice* _device;
@@ -394,6 +400,8 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	double _afBestSharp;
 	double _afLockSharp;       // эталон резкости в зафиксированном состоянии
 	int _afLowFrames;
+	double _afS0;              // два предыдущих замера в локе (медианное сглаживание)
+	double _afS1;
 	std::atomic<bool> _afEngaged;   // наш AF управляет линзой (для tap-to-focus)
 	std::atomic<bool> _afRestart;   // запрос перефокусировки (тап)
 }
@@ -793,6 +801,13 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 	if (_afPhase == 0) {
 
+		if (g_afDeadKnown && device.isLockingFocusWithCustomLensPositionSupported) {
+			NSLog(@"BarcodeScannerZXing af: dead AF known, contrast AF engaged immediately");
+			_afEngaged = true;
+			[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
+			return;
+		}
+
 		if (_afT0 == 0.0) {
 			_afT0 = CACurrentMediaTime();
 			_afWinMin = 1.0f;
@@ -830,6 +845,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 		NSLog(@"BarcodeScannerZXing af: lens parked at %.3f..%.3f, contrast AF engaged",
 			_afWinMin, _afWinMax);
+		g_afDeadKnown = true;
 		_afEngaged = true;
 		[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
 		return;
@@ -867,27 +883,33 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		_afLockSharp = _afBestSharp;
 		_afLowFrames = 0;
 		_afIdleFrames = 0;
+		_afS0 = _afBestSharp;
+		_afS1 = _afBestSharp;
 		_afArrived = NO;
 		_afWaitFrames = 20;
 		[self afSetLens:_afBestPos];
 		return;
 	}
 
-	// Зафиксирован: следим за резкостью, при устойчивом падении — перефокусировка
-	// (сменилась дистанция или объект).
+	// Зафиксирован: следим за резкостью с медианным сглаживанием (дрожь рук даёт
+	// одиночные провалы); перефокусировка — только при сильном устойчивом падении,
+	// и ЛОКАЛЬНАЯ, вокруг текущей позиции (полная шкала — по тапу или на мыле).
 	if (![self afReadyToMeasure:device target:_afBestPos])
 		return;
 
 	const double sharp = SharpnessOfCenter(_lumBuffer.data(), width, height);
+	const double median = std::max(std::min(sharp, std::max(_afS0, _afS1)), std::min(_afS0, _afS1));
+	_afS1 = _afS0;
+	_afS0 = sharp;
 
-	if (sharp > _afLockSharp)
-		_afLockSharp = sharp;
+	if (median > _afLockSharp)
+		_afLockSharp = median;
 
-	if (sharp < _afLockSharp * 0.45) {
+	if (_afLockSharp >= 4.0 && median < _afLockSharp * 0.35) {
 
-		if (++_afLowFrames >= 10) {
-			NSLog(@"BarcodeScannerZXing af: sharpness dropped (%.1f < %.1f), refocus", sharp, _afLockSharp);
-			[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
+		if (++_afLowFrames >= 20) {
+			NSLog(@"BarcodeScannerZXing af: sharpness dropped (%.1f < %.1f), local refocus", median, _afLockSharp);
+			[self afStartSweep:_afBestPos - 0.2f to:_afBestPos + 0.2f step:0.05f phase:1];
 			return;
 		}
 
@@ -896,7 +918,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	}
 
 	// Вся шкала при поиске оказалась мыльной (в центре не было фактуры) — лок
-	// ненадёжен: периодически повторяем поиск, пока не появится выраженный пик.
+	// ненадёжен: периодически повторяем полный поиск, пока не появится пик.
 	if (_afLockSharp < 4.0 && ++_afIdleFrames >= 45)
 		[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
 }
