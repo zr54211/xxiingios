@@ -7,9 +7,11 @@
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -374,10 +376,22 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	std::chrono::steady_clock::time_point _lastEmitAt;
 	BOOL _markersShown;
 	BOOL _closing;
-	// Диагностика мёртвого автофокуса (временный код): телеметрия линзы + focus sweep.
-	dispatch_source_t _lensTimer;
-	double _lensT0;
-	int _sweepIndex;
+	// Свой контрастный автофокус: включается, только если штатный AF не двигает
+	// линзу (аппаратно мёртвый контур AF, подтверждено на iPhone XS). Вся машина
+	// состояний живёт на _videoQueue; установка линзы уходит на _sessionQueue.
+	int _afPhase;              // 0 наблюдение, 1 грубый проход, 2 тонкий, 3 зафиксирован, 4 штатный AF жив
+	double _afT0;              // начало наблюдения
+	float _afObserveLens;      // позиция линзы в начале наблюдения
+	int _afSettle;             // кадров подождать после команды линзе (ход + конвейер камеры)
+	float _afGrid[24];
+	int _afGridCount;
+	int _afGridIndex;
+	float _afBestPos;
+	double _afBestSharp;
+	double _afLockSharp;       // эталон резкости в зафиксированном состоянии
+	int _afLowFrames;
+	std::atomic<bool> _afEngaged;   // наш AF управляет линзой (для tap-to-focus)
+	std::atomic<bool> _afRestart;   // запрос перефокусировки (тап)
 }
 
 - (instancetype)init
@@ -484,20 +498,6 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 
 			});
 
-		// Диагностика мёртвого автофокуса: первые секунды — телеметрия линзы,
-		// затем перебор фиксированных позиций (focus sweep) до распознавания.
-		self->_lensT0 = CACurrentMediaTime();
-		self->_sweepIndex = 0;
-		self->_lensTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self->_sessionQueue);
-		dispatch_source_set_timer(self->_lensTimer,
-			dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-			(uint64_t)(0.45 * NSEC_PER_SEC), (uint64_t)(0.05 * NSEC_PER_SEC));
-		__weak BSZScanner* weakSelf = self;
-		dispatch_source_set_event_handler(self->_lensTimer, ^{
-			[weakSelf lensTimerTick];
-		});
-		dispatch_resume(self->_lensTimer);
-
 	});
 
 	if (g_torchOnStart)
@@ -597,6 +597,13 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 		[_previewLayer captureDevicePointOfInterestForPoint:
 			[self.root.layer convertPoint:layerPoint toLayer:_previewLayer]];
 
+	// Если линзой управляет наш контрастный AF (штатный мёртв) — тап лишь
+	// запускает перефокусировку, режим фокуса не трогаем.
+	if (_afEngaged) {
+		_afRestart = true;
+		return;
+	}
+
 	if (![_device lockForConfiguration:nil])
 		return;
 
@@ -683,32 +690,156 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	[self.root insertSubview:frozen belowSubview:_markers];
 }
 
-// Поток _sessionQueue. До 3.5 с наблюдаем штатный AF (телеметрия), дальше —
-// ручной перебор позиций линзы по кругу: на устройстве с мёртвым контуром AF,
-// но живой механикой одна из позиций даст резкий кадр и код распознается.
-- (void)lensTimerTick
+// Резкость центральной области кадра: средний горизонтальный градиент яркости.
+static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
+{
+	const int x0 = width * 3 / 8;
+	const int x1 = width * 5 / 8;
+	const int y0 = height * 3 / 8;
+	const int y1 = height * 5 / 8;
+
+	double sum = 0.0;
+	long count = 0;
+
+	for (int y = y0; y < y1; y += 4) {
+
+		const uint8_t* row = lum + (size_t)y * width;
+
+		for (int x = x0; x < x1 - 2; x += 2) {
+			sum += std::abs((int)row[x + 2] - (int)row[x]);
+			++count;
+		}
+
+	}
+
+	return count > 0 ? sum / count : 0.0;
+}
+
+// Команда линзе; выполняется на _sessionQueue, чтобы не спорить с настройкой камеры.
+- (void)afSetLens:(float)pos
 {
 	AVCaptureDevice* device = _device;
+	dispatch_async(_sessionQueue, ^{
 
-	if (_closing || !device)
+		if (device && [device lockForConfiguration:nil]) {
+			[device setFocusModeLockedWithLensPosition:pos completionHandler:nil];
+			[device unlockForConfiguration];
+		}
+
+	});
+}
+
+- (void)afStartSweep:(float)from to:(float)to step:(float)step phase:(int)phase
+{
+	_afGridCount = 0;
+
+	for (float p = from; p <= to + 0.001f && _afGridCount < 24; p += step)
+		_afGrid[_afGridCount++] = std::min(std::max(p, 0.0f), 1.0f);
+
+	_afGridIndex = 0;
+	_afBestPos = _afGrid[0];
+	_afBestSharp = -1.0;
+	_afPhase = phase;
+	_afSettle = 4;
+	[self afSetLens:_afGrid[0]];
+}
+
+// Поток _videoQueue, каждый кадр (после копии Y-плоскости, до декодирования).
+- (void)afProcessFrame:(int)width height:(int)height
+{
+	if (_afPhase == 4)
 		return;
 
-	double t = CACurrentMediaTime() - _lensT0;
+	AVCaptureDevice* device = _device;
 
-	if (t < 3.5 || !device.isLockingFocusWithCustomLensPositionSupported) {
-		NSLog(@"BarcodeScannerZXing lens: t=%.1f pos=%.3f adj=%d mode=%ld",
-			t, device.lensPosition, (int)device.adjustingFocus, (long)device.focusMode);
+	if (!device)
+		return;
+
+	if (_afRestart.exchange(false) && _afPhase >= 1) {
+		[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
 		return;
 	}
 
-	static const float kPositions[] = {0.05f, 0.15f, 0.25f, 0.35f, 0.45f, 0.55f, 0.65f, 0.75f, 0.85f, 0.95f};
-	float pos = kPositions[_sweepIndex % 10];
-	_sweepIndex++;
+	if (_afPhase == 0) {
 
-	if ([device lockForConfiguration:nil]) {
-		[device setFocusModeLockedWithLensPosition:pos completionHandler:nil];
-		[device unlockForConfiguration];
-		NSLog(@"BarcodeScannerZXing sweep: t=%.1f set=%.2f actual=%.3f", t, pos, device.lensPosition);
+		if (_afT0 == 0.0) {
+			_afT0 = CACurrentMediaTime();
+			_afObserveLens = device.lensPosition;
+			return;
+		}
+
+		// Штатный AF двигает линзу — не вмешиваемся (здоровое устройство).
+		if (std::abs(device.lensPosition - _afObserveLens) > 0.02f) {
+			_afPhase = 4;
+			NSLog(@"BarcodeScannerZXing af: platform AF alive, standing by");
+			return;
+		}
+
+		if (CACurrentMediaTime() - _afT0 < 2.5)
+			return;
+
+		if (!device.isLockingFocusWithCustomLensPositionSupported) {
+			_afPhase = 4;
+			return;
+		}
+
+		NSLog(@"BarcodeScannerZXing af: lens frozen at %.3f, contrast AF engaged", device.lensPosition);
+		_afEngaged = true;
+		[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
+		return;
+	}
+
+	if (_afSettle > 0) {
+		_afSettle--;
+		return;
+	}
+
+	const double sharp = SharpnessOfCenter(_lumBuffer.data(), width, height);
+
+	if (_afPhase == 1 || _afPhase == 2) {
+
+		if (sharp > _afBestSharp) {
+			_afBestSharp = sharp;
+			_afBestPos = _afGrid[_afGridIndex];
+		}
+
+		_afGridIndex++;
+
+		if (_afGridIndex < _afGridCount) {
+			_afSettle = 4;
+			[self afSetLens:_afGrid[_afGridIndex]];
+			return;
+		}
+
+		if (_afPhase == 1) {
+			NSLog(@"BarcodeScannerZXing af: coarse best=%.2f sharp=%.1f", _afBestPos, _afBestSharp);
+			[self afStartSweep:_afBestPos - 0.09f to:_afBestPos + 0.09f step:0.03f phase:2];
+			return;
+		}
+
+		NSLog(@"BarcodeScannerZXing af: locked pos=%.3f sharp=%.1f", _afBestPos, _afBestSharp);
+		_afPhase = 3;
+		_afLockSharp = _afBestSharp;
+		_afLowFrames = 0;
+		_afSettle = 4;
+		[self afSetLens:_afBestPos];
+		return;
+	}
+
+	// Зафиксирован: следим за резкостью, при устойчивом падении — перефокусировка
+	// (сменилась дистанция или объект).
+	if (sharp > _afLockSharp)
+		_afLockSharp = sharp;
+
+	if (sharp < _afLockSharp * 0.45) {
+
+		if (++_afLowFrames >= 10) {
+			NSLog(@"BarcodeScannerZXing af: sharpness dropped (%.1f < %.1f), refocus", sharp, _afLockSharp);
+			[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
+		}
+
+	} else {
+		_afLowFrames = 0;
 	}
 }
 
@@ -716,11 +847,6 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 {
 	_closing = YES;
 	[_markers invalidate];
-
-	if (_lensTimer) {
-		dispatch_source_cancel(_lensTimer);
-		_lensTimer = nil;
-	}
 
 	AVCaptureSession* session = _session;
 	dispatch_async(_sessionQueue, ^{
@@ -767,6 +893,8 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 
 	if (_lumBuffer.empty())
 		return;
+
+	[self afProcessFrame:width height:height];
 
 	const bsz::DecodeResult decoded = bsz::DecodeLuminanceEx(_lumBuffer.data(), width, height);
 
