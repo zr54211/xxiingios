@@ -381,7 +381,8 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	// состояний живёт на _videoQueue; установка линзы уходит на _sessionQueue.
 	int _afPhase;              // 0 наблюдение, 1 грубый проход, 2 тонкий, 3 зафиксирован, 4 штатный AF жив
 	double _afT0;              // начало наблюдения
-	float _afObserveLens;      // позиция линзы в начале наблюдения
+	float _afWinMin;           // диапазон позиций линзы в окне наблюдения
+	float _afWinMax;
 	int _afSettle;             // кадров подождать после команды линзе (ход + конвейер камеры)
 	float _afGrid[24];
 	int _afGridCount;
@@ -764,26 +765,41 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 		if (_afT0 == 0.0) {
 			_afT0 = CACurrentMediaTime();
-			_afObserveLens = device.lensPosition;
+			_afWinMin = 1.0f;
+			_afWinMax = 0.0f;
 			return;
 		}
 
-		// Штатный AF двигает линзу — не вмешиваемся (здоровое устройство).
-		if (std::abs(device.lensPosition - _afObserveLens) > 0.02f) {
+		const double t = CACurrentMediaTime() - _afT0;
+
+		// Стартовые дёрганья (инициализация камеры, разовый AutoFocus-«пинок»)
+		// пропускаем; смотрим установившееся положение линзы в окне 1.5–2.5 с.
+		if (t < 1.5)
+			return;
+
+		if (t < 2.5) {
+			const float p = device.lensPosition;
+			_afWinMin = std::min(_afWinMin, p);
+			_afWinMax = std::max(_afWinMax, p);
+			return;
+		}
+
+		// Живой CAF держит линзу на осмысленной позиции сцены; мёртвый контур
+		// паркует её у края (≈0) и не двигает.
+		if (_afWinMax - _afWinMin > 0.01f || _afWinMax > 0.05f) {
 			_afPhase = 4;
-			NSLog(@"BarcodeScannerZXing af: platform AF alive, standing by");
+			NSLog(@"BarcodeScannerZXing af: platform AF alive (lens %.3f..%.3f), standing by",
+				_afWinMin, _afWinMax);
 			return;
 		}
-
-		if (CACurrentMediaTime() - _afT0 < 2.5)
-			return;
 
 		if (!device.isLockingFocusWithCustomLensPositionSupported) {
 			_afPhase = 4;
 			return;
 		}
 
-		NSLog(@"BarcodeScannerZXing af: lens frozen at %.3f, contrast AF engaged", device.lensPosition);
+		NSLog(@"BarcodeScannerZXing af: lens parked at %.3f..%.3f, contrast AF engaged",
+			_afWinMin, _afWinMax);
 		_afEngaged = true;
 		[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
 		return;
