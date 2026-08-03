@@ -387,8 +387,7 @@ static bool g_afDeadKnown = false;
 	// состояний живёт на _videoQueue; установка линзы уходит на _sessionQueue.
 	int _afPhase;              // 0 наблюдение, 1 грубый проход, 2 тонкий, 3 зафиксирован, 4 штатный AF жив
 	double _afT0;              // начало наблюдения
-	float _afWinMin;           // диапазон позиций линзы в окне наблюдения
-	float _afWinMax;
+	double _afMaxSharp;        // максимум резкости, достигнутый штатным AF за наблюдение
 	BOOL _afArrived;           // линза доехала до текущей цели
 	int _afWaitFrames;         // таймаут ожидания хода линзы (кадров)
 	int _afPipeline;           // кадры конвейера камеры после прибытия линзы
@@ -810,41 +809,35 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 		if (_afT0 == 0.0) {
 			_afT0 = CACurrentMediaTime();
-			_afWinMin = 1.0f;
-			_afWinMax = 0.0f;
+			_afMaxSharp = 0.0;
 			return;
 		}
 
-		const double t = CACurrentMediaTime() - _afT0;
+		// Живость штатного AF определяется по результату, а не по движению линзы
+		// (мёртвый контур тоже гоняет её слепыми прогонами): если за окно
+		// наблюдения резкость центра ни разу не поднялась — фокус так и не был
+		// достигнут. На здоровом устройстве код к этому времени обычно уже
+		// распознан и экран закрыт.
+		const double sharp = SharpnessOfCenter(_lumBuffer.data(), width, height);
 
-		// Стартовые дёрганья (инициализация камеры, разовый AutoFocus-«пинок»)
-		// пропускаем; смотрим установившееся положение линзы в окне 1.5–2.5 с.
-		if (t < 1.5)
-			return;
+		if (sharp > _afMaxSharp)
+			_afMaxSharp = sharp;
 
-		if (t < 2.5) {
-			const float p = device.lensPosition;
-			_afWinMin = std::min(_afWinMin, p);
-			_afWinMax = std::max(_afWinMax, p);
-			return;
-		}
-
-		// Живой CAF держит линзу на осмысленной позиции сцены; мёртвый контур
-		// паркует её у края (≈0) и не двигает.
-		if (_afWinMax - _afWinMin > 0.01f || _afWinMax > 0.05f) {
+		if (_afMaxSharp >= 5.0) {
 			_afPhase = 4;
-			NSLog(@"BarcodeScannerZXing af: platform AF alive (lens %.3f..%.3f), standing by",
-				_afWinMin, _afWinMax);
+			NSLog(@"BarcodeScannerZXing af: platform AF alive (sharp %.1f), standing by", _afMaxSharp);
 			return;
 		}
+
+		if (CACurrentMediaTime() - _afT0 < 3.0)
+			return;
 
 		if (!device.isLockingFocusWithCustomLensPositionSupported) {
 			_afPhase = 4;
 			return;
 		}
 
-		NSLog(@"BarcodeScannerZXing af: lens parked at %.3f..%.3f, contrast AF engaged",
-			_afWinMin, _afWinMax);
+		NSLog(@"BarcodeScannerZXing af: no focus in 3 s (max sharp %.1f), contrast AF engaged", _afMaxSharp);
 		g_afDeadKnown = true;
 		_afEngaged = true;
 		[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
