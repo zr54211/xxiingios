@@ -374,6 +374,10 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	std::chrono::steady_clock::time_point _lastEmitAt;
 	BOOL _markersShown;
 	BOOL _closing;
+	// Диагностика мёртвого автофокуса (временный код): телеметрия линзы + focus sweep.
+	dispatch_source_t _lensTimer;
+	double _lensT0;
+	int _sweepIndex;
 }
 
 - (instancetype)init
@@ -479,6 +483,20 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 				}
 
 			});
+
+		// Диагностика мёртвого автофокуса: первые секунды — телеметрия линзы,
+		// затем перебор фиксированных позиций (focus sweep) до распознавания.
+		self->_lensT0 = CACurrentMediaTime();
+		self->_sweepIndex = 0;
+		self->_lensTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self->_sessionQueue);
+		dispatch_source_set_timer(self->_lensTimer,
+			dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+			(uint64_t)(0.45 * NSEC_PER_SEC), (uint64_t)(0.05 * NSEC_PER_SEC));
+		__weak BSZScanner* weakSelf = self;
+		dispatch_source_set_event_handler(self->_lensTimer, ^{
+			[weakSelf lensTimerTick];
+		});
+		dispatch_resume(self->_lensTimer);
 
 	});
 
@@ -665,10 +683,44 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	[self.root insertSubview:frozen belowSubview:_markers];
 }
 
+// Поток _sessionQueue. До 3.5 с наблюдаем штатный AF (телеметрия), дальше —
+// ручной перебор позиций линзы по кругу: на устройстве с мёртвым контуром AF,
+// но живой механикой одна из позиций даст резкий кадр и код распознается.
+- (void)lensTimerTick
+{
+	AVCaptureDevice* device = _device;
+
+	if (_closing || !device)
+		return;
+
+	double t = CACurrentMediaTime() - _lensT0;
+
+	if (t < 3.5 || !device.isLockingFocusWithCustomLensPositionSupported) {
+		NSLog(@"BarcodeScannerZXing lens: t=%.1f pos=%.3f adj=%d mode=%ld",
+			t, device.lensPosition, (int)device.adjustingFocus, (long)device.focusMode);
+		return;
+	}
+
+	static const float kPositions[] = {0.05f, 0.15f, 0.25f, 0.35f, 0.45f, 0.55f, 0.65f, 0.75f, 0.85f, 0.95f};
+	float pos = kPositions[_sweepIndex % 10];
+	_sweepIndex++;
+
+	if ([device lockForConfiguration:nil]) {
+		[device setFocusModeLockedWithLensPosition:pos completionHandler:nil];
+		[device unlockForConfiguration];
+		NSLog(@"BarcodeScannerZXing sweep: t=%.1f set=%.2f actual=%.3f", t, pos, device.lensPosition);
+	}
+}
+
 - (void)stop
 {
 	_closing = YES;
 	[_markers invalidate];
+
+	if (_lensTimer) {
+		dispatch_source_cancel(_lensTimer);
+		_lensTimer = nil;
+	}
 
 	AVCaptureSession* session = _session;
 	dispatch_async(_sessionQueue, ^{

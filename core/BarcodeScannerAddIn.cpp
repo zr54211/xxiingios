@@ -17,7 +17,7 @@ constexpr char16_t kExtensionName[] = u"BarcodeScannerZXing";
 constexpr char16_t kEventSource[]   = u"BarcodeScannerZXing";
 constexpr char16_t kEventScan[]     = u"ScanResult";
 
-constexpr char kComponentVersion[] = "0.1.0";
+constexpr char kComponentVersion[] = "0.2.0";
 
 // Имена: [0] - английский (международный) синоним, [1] - русский.
 constexpr std::array<std::array<const char16_t*, 2>, 1> kPropNames = {{
