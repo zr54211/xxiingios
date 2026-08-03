@@ -392,16 +392,18 @@ static bool g_afDeadKnown = false;
 	int _afWaitFrames;         // таймаут ожидания хода линзы (кадров)
 	int _afPipeline;           // кадры конвейера камеры после прибытия линзы
 	int _afIdleFrames;         // лок на бесфактурной сцене: счётчик до перепроверки
-	// Скользящий проход: линза едет мелким шагом каждый кадр, замер кадра
-	// сопоставляется с позицией, командованной несколько кадров назад
-	// (лаг конвейера камеры). На ближней дистанции глубина резкости уже,
-	// чем крупный шаг, — пошаговый перебор зону фокуса перепрыгивает.
-	float _afSlidePos;
-	float _afSlideEnd;
-	float _afSlideStep;
-	float _afCmdHist[8];
-	unsigned _afCmdIdx;
+	// Скользящий проход: цели идут плотной лесенкой, а замер каждого кадра
+	// сопоставляется с ФАКТИЧЕСКОЙ позицией линзы (device.lensPosition)
+	// трёхкадровой давности — лаг конвейера камеры. Привязка по командам
+	// не работает: драйвер линзы ведёт её плавно, и частые команды обрывают
+	// ход в самом начале.
+	float _afTargetPos;
+	float _afTargetEnd;
+	float _afTargetStep;
+	float _afPosHist[8];
+	unsigned _afPosIdx;
 	int _afSlideWarmup;
+	int _afTick;
 	double _afSharpSum;
 	long _afSharpN;
 	float _afBestPos;
@@ -754,15 +756,16 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	from = std::min(std::max(from, 0.0f), 1.0f);
 	to = std::min(std::max(to, 0.0f), 1.0f);
 
-	_afSlidePos = from;
-	_afSlideEnd = to;
-	_afSlideStep = (to >= from ? step : -step);
+	_afTargetPos = from;
+	_afTargetEnd = to;
+	_afTargetStep = (to >= from ? step : -step);
 
 	for (int i = 0; i < 8; i++)
-		_afCmdHist[i] = from;
+		_afPosHist[i] = from;
 
-	_afCmdIdx = 0;
+	_afPosIdx = 0;
 	_afSlideWarmup = 6;
+	_afTick = 0;
 	_afSharpSum = 0.0;
 	_afSharpN = 0;
 	_afBestPos = from;
@@ -811,7 +814,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		return;
 
 	if (_afRestart.exchange(false) && _afPhase >= 1) {
-		[self afStartSweep:0.0f to:1.0f step:0.02f phase:1];
+		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
 		return;
 	}
 
@@ -820,7 +823,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		if (g_afDeadKnown && device.isLockingFocusWithCustomLensPositionSupported) {
 			NSLog(@"BarcodeScannerZXing af: dead AF known, contrast AF engaged immediately");
 			_afEngaged = true;
-			[self afStartSweep:0.0f to:1.0f step:0.02f phase:1];
+			[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
 			return;
 		}
 
@@ -857,21 +860,23 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		NSLog(@"BarcodeScannerZXing af: no focus in 3 s (max sharp %.1f), contrast AF engaged", _afMaxSharp);
 		g_afDeadKnown = true;
 		_afEngaged = true;
-		[self afStartSweep:0.0f to:1.0f step:0.02f phase:1];
+		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
 		return;
 	}
 
 	if (_afPhase == 1 || _afPhase == 2) {
 
+		// Кольцо фактических позиций — каждый кадр.
+		_afPosHist[_afPosIdx++ & 7] = device.lensPosition;
+
 		// Прогрев: линза едет к старту прохода, конвейер камеры наполняется.
 		if (_afSlideWarmup > 0) {
 			_afSlideWarmup--;
-			_afCmdHist[_afCmdIdx++ & 7] = _afSlidePos;
 			return;
 		}
 
-		// Замер кадра против позиции, командованной 3 кадра назад.
-		const float measuredPos = _afCmdHist[(_afCmdIdx - 3) & 7];
+		// Замер кадра против фактической позиции линзы 3 кадра назад.
+		const float measuredPos = _afPosHist[(_afPosIdx - 1 - 3) & 7];
 		const double sharp = SharpnessOfCenter(_lumBuffer.data(), width, height);
 
 		_afSharpSum += sharp;
@@ -882,21 +887,24 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 			_afBestPos = measuredPos;
 		}
 
-		const bool moreToGo = (_afSlideStep > 0.0f) ? (_afSlidePos < _afSlideEnd - 1e-4f)
-			: (_afSlidePos > _afSlideEnd + 1e-4f);
+		// Цели продвигаются раз в 2 кадра — линза ползёт лесенкой через всю шкалу.
+		if (++_afTick % 2 != 0)
+			return;
+
+		const bool moreToGo = (_afTargetStep > 0.0f) ? (_afTargetPos < _afTargetEnd - 1e-4f)
+			: (_afTargetPos > _afTargetEnd + 1e-4f);
 
 		if (moreToGo) {
-			_afSlidePos += _afSlideStep;
-			_afSlidePos = std::min(std::max(_afSlidePos, 0.0f), 1.0f);
-			_afCmdHist[_afCmdIdx++ & 7] = _afSlidePos;
-			[self afSetLens:_afSlidePos];
+			_afTargetPos += _afTargetStep;
+			_afTargetPos = std::min(std::max(_afTargetPos, 0.0f), 1.0f);
+			[self afSetLens:_afTargetPos];
 			return;
 		}
 
 		if (_afPhase == 1) {
 			NSLog(@"BarcodeScannerZXing af: coarse peak=%.3f sharp=%.1f (mean %.1f)",
 				_afBestPos, _afBestSharp, _afSharpN ? _afSharpSum / _afSharpN : 0.0);
-			[self afStartSweep:_afBestPos - 0.06f to:_afBestPos + 0.06f step:0.012f phase:2];
+			[self afStartSweep:_afBestPos - 0.05f to:_afBestPos + 0.05f step:0.012f phase:2];
 			return;
 		}
 
@@ -931,7 +939,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 		if (++_afLowFrames >= 15) {
 			NSLog(@"BarcodeScannerZXing af: sharpness dropped (%.1f < %.1f), local refocus", median, _afLockSharp);
-			[self afStartSweep:_afBestPos - 0.15f to:_afBestPos + 0.15f step:0.02f phase:1];
+			[self afStartSweep:_afBestPos - 0.15f to:_afBestPos + 0.15f step:0.033f phase:1];
 			return;
 		}
 
@@ -942,7 +950,7 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	// Вся шкала при поиске оказалась мыльной (в центре не было фактуры) — лок
 	// ненадёжен: периодически повторяем полный поиск, пока не появится пик.
 	if (_afLockSharp < 3.0 && ++_afIdleFrames >= 90)
-		[self afStartSweep:0.0f to:1.0f step:0.02f phase:1];
+		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
 }
 
 - (void)stop
