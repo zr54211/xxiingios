@@ -453,9 +453,6 @@ static AVCaptureDevice* TelephotoDevice(void)
 	if (g_useTelephoto) {
 		_device = TelephotoDevice();
 		_usingTelephoto = _device != nil;
-
-		if (_usingTelephoto)
-			NSLog(@"BarcodeScannerZXing af: using telephoto camera module");
 	}
 
 	if (!_device)
@@ -765,7 +762,6 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 		[self->_session commitConfiguration];
 		self->_device = tele;
-		NSLog(@"BarcodeScannerZXing af: switched to telephoto camera module");
 	});
 }
 
@@ -853,7 +849,6 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	if (_afPhase == 0) {
 
 		if (g_afDeadKnown && device.isLockingFocusWithCustomLensPositionSupported) {
-			NSLog(@"BarcodeScannerZXing af: dead AF known, contrast AF engaged immediately");
 			_afEngaged = true;
 			[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
 			return;
@@ -877,7 +872,6 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 		if (_afMaxSharp >= 5.0) {
 			_afPhase = 4;
-			NSLog(@"BarcodeScannerZXing af: platform AF alive (sharp %.1f), standing by", _afMaxSharp);
 			return;
 		}
 
@@ -887,7 +881,6 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		// Контур AF текущего модуля мёртв. Сначала — телефото (свой привод
 		// и контур; на iPhone XS он жив при мёртвом wide), затем контрастный AF.
 		if (!_usingTelephoto && TelephotoDevice() != nil) {
-			NSLog(@"BarcodeScannerZXing af: no focus in 4 s (max sharp %.1f), trying telephoto", _afMaxSharp);
 			_usingTelephoto = YES;
 			g_useTelephoto = true;
 			_afT0 = 0.0;
@@ -900,7 +893,6 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 			return;
 		}
 
-		NSLog(@"BarcodeScannerZXing af: no focus in 4 s (max sharp %.1f), contrast AF engaged", _afMaxSharp);
 		g_afDeadKnown = true;
 		_afEngaged = true;
 		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
@@ -945,13 +937,10 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		}
 
 		if (_afPhase == 1) {
-			NSLog(@"BarcodeScannerZXing af: coarse peak=%.3f sharp=%.1f (mean %.1f)",
-				_afBestPos, _afBestSharp, _afSharpN ? _afSharpSum / _afSharpN : 0.0);
 			[self afStartSweep:_afBestPos - 0.05f to:_afBestPos + 0.05f step:0.012f phase:2];
 			return;
 		}
 
-		NSLog(@"BarcodeScannerZXing af: locked pos=%.3f sharp=%.1f", _afBestPos, _afBestSharp);
 		_afPhase = 3;
 		_afLockSharp = _afBestSharp;
 		_afLowFrames = 0;
@@ -981,7 +970,6 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	if (_afLockSharp >= 4.0 && median < _afLockSharp * 0.35) {
 
 		if (++_afLowFrames >= 15) {
-			NSLog(@"BarcodeScannerZXing af: sharpness dropped (%.1f < %.1f), local refocus", median, _afLockSharp);
 			[self afStartSweep:_afBestPos - 0.15f to:_afBestPos + 0.15f step:0.033f phase:1];
 			return;
 		}
