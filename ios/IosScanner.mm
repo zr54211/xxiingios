@@ -369,6 +369,20 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 // «штатный жив» на её медленной парковке).
 static bool g_afDeadKnown = false;
 
+// «Нужен телефото»: у wide-модуля контур AF может быть мёртв в video-сессиях
+// (iPhone XS) при живом телефото — тогда следующие открытия сканера сразу
+// используют телефото, без 4-секундного наблюдения за wide.
+static bool g_useTelephoto = false;
+
+static AVCaptureDevice* TelephotoDevice(void)
+{
+	AVCaptureDeviceDiscoverySession* discovery = [AVCaptureDeviceDiscoverySession
+		discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInTelephotoCamera]
+		mediaType:AVMediaTypeVideo
+		position:AVCaptureDevicePositionBack];
+	return discovery.devices.firstObject;
+}
+
 @implementation BSZScanner {
 	AVCaptureSession* _session;
 	AVCaptureDevice* _device;
@@ -414,6 +428,7 @@ static bool g_afDeadKnown = false;
 	double _afS1;
 	std::atomic<bool> _afEngaged;   // наш AF управляет линзой (для tap-to-focus)
 	std::atomic<bool> _afRestart;   // запрос перефокусировки (тап)
+	BOOL _usingTelephoto;
 }
 
 - (instancetype)init
@@ -433,18 +448,17 @@ static bool g_afDeadKnown = false;
 		return NO;
 	}
 
-	// Диагностика: телефото-модуль вместо wide — у него собственная линза и
-	// собственный контур AF (на iPhone XS контур wide-модуля мёртв в video-сессии,
-	// хотя приложение «Камера» фокусируется).
-	AVCaptureDeviceDiscoverySession* discovery = [AVCaptureDeviceDiscoverySession
-		discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInTelephotoCamera]
-		mediaType:AVMediaTypeVideo
-		position:AVCaptureDevicePositionBack];
-	_device = discovery.devices.firstObject;
+	// Основной модуль — wide; телефото сразу, если по прошлому открытию известно,
+	// что контур AF wide-модуля мёртв (у телефото свой привод и контур).
+	if (g_useTelephoto) {
+		_device = TelephotoDevice();
+		_usingTelephoto = _device != nil;
 
-	if (_device)
-		NSLog(@"BarcodeScannerZXing af: using telephoto camera module");
-	else
+		if (_usingTelephoto)
+			NSLog(@"BarcodeScannerZXing af: using telephoto camera module");
+	}
+
+	if (!_device)
 		_device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
 
 	if (!_device) {
@@ -722,6 +736,39 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	return count > 0 ? sum / count : 0.0;
 }
 
+// Горячая замена входа сессии на телефото-модуль (контур AF wide мёртв).
+// Выполняется на _sessionQueue; превью и маппинг точек продолжают работать.
+- (void)switchToTelephoto
+{
+	dispatch_async(_sessionQueue, ^{
+
+		AVCaptureDevice* tele = TelephotoDevice();
+
+		if (!tele || !self->_session)
+			return;
+
+		NSError* error = nil;
+		AVCaptureDeviceInput* input = [AVCaptureDeviceInput deviceInputWithDevice:tele error:&error];
+
+		if (!input) {
+			NSLog(@"BarcodeScannerZXing af: telephoto input failed: %@", error);
+			return;
+		}
+
+		[self->_session beginConfiguration];
+
+		for (AVCaptureDeviceInput* old in self->_session.inputs)
+			[self->_session removeInput:old];
+
+		if ([self->_session canAddInput:input])
+			[self->_session addInput:input];
+
+		[self->_session commitConfiguration];
+		self->_device = tele;
+		NSLog(@"BarcodeScannerZXing af: switched to telephoto camera module");
+	});
+}
+
 // Команда линзе; выполняется на _sessionQueue, чтобы не спорить с настройкой камеры.
 - (void)afSetLens:(float)pos
 {
@@ -836,6 +883,17 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 		if (CACurrentMediaTime() - _afT0 < 4.0)
 			return;
+
+		// Контур AF текущего модуля мёртв. Сначала — телефото (свой привод
+		// и контур; на iPhone XS он жив при мёртвом wide), затем контрастный AF.
+		if (!_usingTelephoto && TelephotoDevice() != nil) {
+			NSLog(@"BarcodeScannerZXing af: no focus in 4 s (max sharp %.1f), trying telephoto", _afMaxSharp);
+			_usingTelephoto = YES;
+			g_useTelephoto = true;
+			_afT0 = 0.0;
+			[self switchToTelephoto];
+			return;
+		}
 
 		if (!device.isLockingFocusWithCustomLensPositionSupported) {
 			_afPhase = 4;
