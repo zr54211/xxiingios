@@ -383,7 +383,10 @@ static const float kCornerRadiusPx = 9.0f; // паритет с CornerPathEffect
 	double _afT0;              // начало наблюдения
 	float _afWinMin;           // диапазон позиций линзы в окне наблюдения
 	float _afWinMax;
-	int _afSettle;             // кадров подождать после команды линзе (ход + конвейер камеры)
+	BOOL _afArrived;           // линза доехала до текущей цели
+	int _afWaitFrames;         // таймаут ожидания хода линзы (кадров)
+	int _afPipeline;           // кадры конвейера камеры после прибытия линзы
+	int _afIdleFrames;         // лок на бесфактурной сцене: счётчик до перепроверки
 	float _afGrid[24];
 	int _afGridCount;
 	int _afGridIndex;
@@ -741,8 +744,35 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	_afBestPos = _afGrid[0];
 	_afBestSharp = -1.0;
 	_afPhase = phase;
-	_afSettle = 4;
+	_afArrived = NO;
+	_afWaitFrames = 20;
+	_afPipeline = 0;
+	_afIdleFrames = 0;
 	[self afSetLens:_afGrid[0]];
+}
+
+// Замер допустим только когда линза фактически доехала до цели и кадры
+// конвейера камеры, снятые в пути, ушли. Возвращает NO, пока ждём.
+- (BOOL)afReadyToMeasure:(AVCaptureDevice*)device target:(float)target
+{
+	if (!_afArrived) {
+
+		if (std::abs(device.lensPosition - target) <= 0.012f)
+			_afArrived = YES;
+		else if (--_afWaitFrames <= 0)
+			_afArrived = YES;
+		else
+			return NO;
+
+		_afPipeline = 3;
+	}
+
+	if (_afPipeline > 0) {
+		_afPipeline--;
+		return NO;
+	}
+
+	return YES;
 }
 
 // Поток _videoQueue, каждый кадр (после копии Y-плоскости, до декодирования).
@@ -805,14 +835,12 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		return;
 	}
 
-	if (_afSettle > 0) {
-		_afSettle--;
-		return;
-	}
-
-	const double sharp = SharpnessOfCenter(_lumBuffer.data(), width, height);
-
 	if (_afPhase == 1 || _afPhase == 2) {
+
+		if (![self afReadyToMeasure:device target:_afGrid[_afGridIndex]])
+			return;
+
+		const double sharp = SharpnessOfCenter(_lumBuffer.data(), width, height);
 
 		if (sharp > _afBestSharp) {
 			_afBestSharp = sharp;
@@ -822,7 +850,8 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		_afGridIndex++;
 
 		if (_afGridIndex < _afGridCount) {
-			_afSettle = 4;
+			_afArrived = NO;
+			_afWaitFrames = 20;
 			[self afSetLens:_afGrid[_afGridIndex]];
 			return;
 		}
@@ -837,13 +866,20 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		_afPhase = 3;
 		_afLockSharp = _afBestSharp;
 		_afLowFrames = 0;
-		_afSettle = 4;
+		_afIdleFrames = 0;
+		_afArrived = NO;
+		_afWaitFrames = 20;
 		[self afSetLens:_afBestPos];
 		return;
 	}
 
 	// Зафиксирован: следим за резкостью, при устойчивом падении — перефокусировка
 	// (сменилась дистанция или объект).
+	if (![self afReadyToMeasure:device target:_afBestPos])
+		return;
+
+	const double sharp = SharpnessOfCenter(_lumBuffer.data(), width, height);
+
 	if (sharp > _afLockSharp)
 		_afLockSharp = sharp;
 
@@ -852,11 +888,17 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		if (++_afLowFrames >= 10) {
 			NSLog(@"BarcodeScannerZXing af: sharpness dropped (%.1f < %.1f), refocus", sharp, _afLockSharp);
 			[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
+			return;
 		}
 
 	} else {
 		_afLowFrames = 0;
 	}
+
+	// Вся шкала при поиске оказалась мыльной (в центре не было фактуры) — лок
+	// ненадёжен: периодически повторяем поиск, пока не появится выраженный пик.
+	if (_afLockSharp < 4.0 && ++_afIdleFrames >= 45)
+		[self afStartSweep:0.0f to:1.0f step:0.1f phase:1];
 }
 
 - (void)stop
