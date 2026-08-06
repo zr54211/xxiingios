@@ -374,6 +374,16 @@ static bool g_afDeadKnown = false;
 // используют телефото, без 4-секундного наблюдения за wide.
 static bool g_useTelephoto = false;
 
+// ТЕСТОВАЯ ВЕТКА: принудительный AF-режим, циклится двухпальцевым тапом по превью.
+// 0 — боевой каскад, 1 — контрастный AF на wide, 2 — контрастный AF на телефото.
+// Держится на сеанс приложения и применяется к уже открытому сканеру.
+static int g_afTestMode = 0;
+
+static const char* AfTestModeName(int mode)
+{
+	return mode == 1 ? "contrast-wide" : (mode == 2 ? "contrast-tele" : "cascade");
+}
+
 static AVCaptureDevice* TelephotoDevice(void)
 {
 	AVCaptureDeviceDiscoverySession* discovery = [AVCaptureDeviceDiscoverySession
@@ -429,6 +439,8 @@ static AVCaptureDevice* TelephotoDevice(void)
 	std::atomic<bool> _afEngaged;   // наш AF управляет линзой (для tap-to-focus)
 	std::atomic<bool> _afRestart;   // запрос перефокусировки (тап)
 	BOOL _usingTelephoto;
+	std::atomic<bool> _afApplyTestMode;   // тест: применить смену режима (двухпальцевый тап)
+	UILabel* _afModeLabel;                // тест: индикатор режима и активной камеры
 }
 
 - (instancetype)init
@@ -450,9 +462,15 @@ static AVCaptureDevice* TelephotoDevice(void)
 
 	// Основной модуль — wide; телефото сразу, если по прошлому открытию известно,
 	// что контур AF wide-модуля мёртв (у телефото свой привод и контур).
-	if (g_useTelephoto) {
+	// Тестовые режимы навязывают камеру: 1 — всегда wide, 2 — телефото.
+	const bool wantTelephoto = g_afTestMode == 2 || (g_afTestMode == 0 && g_useTelephoto);
+
+	if (wantTelephoto) {
 		_device = TelephotoDevice();
 		_usingTelephoto = _device != nil;
+
+		if (!_usingTelephoto)
+			NSLog(@"BarcodeScannerZXing af: telephoto requested but not found, falling back to wide");
 	}
 
 	if (!_device)
@@ -557,6 +575,13 @@ static AVCaptureDevice* TelephotoDevice(void)
 		[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTap:)];
 	[root addGestureRecognizer:tap];
 
+	// ТЕСТ: двухпальцевый тап циклит принудительный AF-режим.
+	UITapGestureRecognizer* modeTap =
+		[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onTestModeTap:)];
+	modeTap.numberOfTouchesRequired = 2;
+	[root addGestureRecognizer:modeTap];
+	[tap requireGestureRecognizerToFail:modeTap];
+
 	// Кнопка закрытия (справа сверху) и фонарик (слева сверху).
 	UIButton* close = [self overlayButtonWithTitle:@"✕"];
 	[close addTarget:self action:@selector(onClose) forControlEvents:UIControlEventTouchUpInside];
@@ -581,6 +606,21 @@ static AVCaptureDevice* TelephotoDevice(void)
 
 	[root addSubview:close];
 	[root addSubview:torch];
+
+	// ТЕСТ: индикатор текущего AF-режима и активной камеры.
+	_afModeLabel = [[UILabel alloc] init];
+	_afModeLabel.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightSemibold];
+	_afModeLabel.textColor = UIColor.whiteColor;
+	_afModeLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.4];
+	_afModeLabel.textAlignment = NSTextAlignmentCenter;
+	_afModeLabel.layer.cornerRadius = 8.0;
+	_afModeLabel.clipsToBounds = YES;
+	_afModeLabel.frame = CGRectMake((w - 230) / 2, topInset + 8, 230, 32);
+	_afModeLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin
+		| UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleBottomMargin;
+	[root addSubview:_afModeLabel];
+	[self updateAfModeLabel];
+
 	[window addSubview:root];
 
 	self.root = root;
@@ -658,6 +698,29 @@ static AVCaptureDevice* TelephotoDevice(void)
 		});
 }
 
+// ТЕСТ: цикл принудительного AF-режима. Сеансовые вердикты каскада сбрасываются,
+// чтобы возврат в боевой режим начинался с чистой диагностики.
+- (void)onTestModeTap:(UITapGestureRecognizer*)gesture
+{
+	g_afTestMode = (g_afTestMode + 1) % 3;
+	g_afDeadKnown = false;
+	g_useTelephoto = false;
+	NSLog(@"BarcodeScannerZXing af: test mode -> %s", AfTestModeName(g_afTestMode));
+	_afApplyTestMode = true;
+	[self updateAfModeLabel];
+}
+
+- (void)updateAfModeLabel
+{
+	dispatch_async(dispatch_get_main_queue(), ^{
+
+		if (self->_afModeLabel)
+			self->_afModeLabel.text = [NSString stringWithFormat:@"AF: %s [%s]",
+				AfTestModeName(g_afTestMode), self->_usingTelephoto ? "tele" : "wide"];
+
+	});
+}
+
 - (BOOL)setTorch:(BOOL)on
 {
 	if (!_device.hasTorch || ![_device lockForConfiguration:nil])
@@ -733,22 +796,26 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	return count > 0 ? sum / count : 0.0;
 }
 
-// Горячая замена входа сессии на телефото-модуль (контур AF wide мёртв).
-// Выполняется на _sessionQueue; превью и маппинг точек продолжают работать.
-- (void)switchToTelephoto
+// Горячая замена входа сессии (wide <-> телефото) на _sessionQueue; превью и
+// маппинг точек продолжают работать. Боевой каскад использует только переход
+// на телефото; обратный переход нужен тестовому переключателю режимов.
+- (void)switchToDevice:(BOOL)telephoto
 {
 	dispatch_async(_sessionQueue, ^{
 
-		AVCaptureDevice* tele = TelephotoDevice();
+		AVCaptureDevice* target = telephoto ? TelephotoDevice()
+			: [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
 
-		if (!tele || !self->_session)
+		if (!target || !self->_session) {
+			NSLog(@"BarcodeScannerZXing af: switch failed, %s not available", telephoto ? "telephoto" : "wide");
 			return;
+		}
 
 		NSError* error = nil;
-		AVCaptureDeviceInput* input = [AVCaptureDeviceInput deviceInputWithDevice:tele error:&error];
+		AVCaptureDeviceInput* input = [AVCaptureDeviceInput deviceInputWithDevice:target error:&error];
 
 		if (!input) {
-			NSLog(@"BarcodeScannerZXing af: telephoto input failed: %@", error);
+			NSLog(@"BarcodeScannerZXing af: %s input failed: %@", telephoto ? "telephoto" : "wide", error);
 			return;
 		}
 
@@ -761,18 +828,42 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 			[self->_session addInput:input];
 
 		[self->_session commitConfiguration];
-		self->_device = tele;
+		self->_device = target;
+		self->_usingTelephoto = telephoto;
+		[self updateAfModeLabel];
 	});
 }
 
 // Команда линзе; выполняется на _sessionQueue, чтобы не спорить с настройкой камеры.
+// Устройство берётся уже внутри блока: команды, отправленные следом за сменой
+// входа сессии, должны попасть в новую камеру, а не в снятую.
 - (void)afSetLens:(float)pos
 {
-	AVCaptureDevice* device = _device;
 	dispatch_async(_sessionQueue, ^{
+
+		AVCaptureDevice* device = self->_device;
 
 		if (device && [device lockForConfiguration:nil]) {
 			[device setFocusModeLockedWithLensPosition:pos completionHandler:nil];
+			[device unlockForConfiguration];
+		}
+
+	});
+}
+
+// Возврат штатного непрерывного AF после контрастного управления линзой
+// (тестовый переключатель вернулся в боевой каскад на той же камере).
+- (void)afResumeContinuous
+{
+	dispatch_async(_sessionQueue, ^{
+
+		AVCaptureDevice* device = self->_device;
+
+		if (device && [device lockForConfiguration:nil]) {
+
+			if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus])
+				device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
+
 			[device unlockForConfiguration];
 		}
 
@@ -833,6 +924,24 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 // Поток _videoQueue, каждый кадр (после копии Y-плоскости, до декодирования).
 - (void)afProcessFrame:(int)width height:(int)height
 {
+	// ТЕСТ: применение смены режима — до раннего выхода фазы 4, иначе после
+	// вердикта «штатный жив» переключатель перестал бы работать.
+	if (_afApplyTestMode.exchange(false)) {
+
+		const BOOL wantTelephoto = g_afTestMode == 2;
+
+		if (wantTelephoto != _usingTelephoto)
+			[self switchToDevice:wantTelephoto];
+		else
+			[self afResumeContinuous];
+
+		_afEngaged = false;
+		_afRestart = false;
+		_afPhase = 0;
+		_afT0 = 0.0;
+		return;
+	}
+
 	if (_afPhase == 4)
 		return;
 
@@ -842,13 +951,30 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		return;
 
 	if (_afRestart.exchange(false) && _afPhase >= 1) {
+		NSLog(@"BarcodeScannerZXing af: tap restart, full sweep");
 		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
 		return;
 	}
 
 	if (_afPhase == 0) {
 
+		// ТЕСТ: принудительный контрастный AF — без окна наблюдения за штатным.
+		if (g_afTestMode != 0) {
+
+			if (!device.isLockingFocusWithCustomLensPositionSupported) {
+				NSLog(@"BarcodeScannerZXing af: manual lens not supported, platform AF stays");
+				_afPhase = 4;
+				return;
+			}
+
+			NSLog(@"BarcodeScannerZXing af: forced contrast AF on %s", _usingTelephoto ? "tele" : "wide");
+			_afEngaged = true;
+			[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
+			return;
+		}
+
 		if (g_afDeadKnown && device.isLockingFocusWithCustomLensPositionSupported) {
+			NSLog(@"BarcodeScannerZXing af: contrast AF re-engaged (cached verdict)");
 			_afEngaged = true;
 			[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
 			return;
@@ -871,6 +997,8 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 			_afMaxSharp = sharp;
 
 		if (_afMaxSharp >= 5.0) {
+			NSLog(@"BarcodeScannerZXing af: platform AF alive on %s (sharp %.1f)",
+				_usingTelephoto ? "tele" : "wide", _afMaxSharp);
 			_afPhase = 4;
 			return;
 		}
@@ -881,18 +1009,22 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		// Контур AF текущего модуля мёртв. Сначала — телефото (свой привод
 		// и контур; на iPhone XS он жив при мёртвом wide), затем контрастный AF.
 		if (!_usingTelephoto && TelephotoDevice() != nil) {
+			NSLog(@"BarcodeScannerZXing af: wide AF loop dead (max sharp %.1f), switching to telephoto", _afMaxSharp);
 			_usingTelephoto = YES;
 			g_useTelephoto = true;
 			_afT0 = 0.0;
-			[self switchToTelephoto];
+			[self switchToDevice:YES];
 			return;
 		}
 
 		if (!device.isLockingFocusWithCustomLensPositionSupported) {
+			NSLog(@"BarcodeScannerZXing af: AF dead but manual lens not supported, platform AF stays");
 			_afPhase = 4;
 			return;
 		}
 
+		NSLog(@"BarcodeScannerZXing af: AF loop dead on %s (max sharp %.1f), contrast AF engaged",
+			_usingTelephoto ? "tele" : "wide", _afMaxSharp);
 		g_afDeadKnown = true;
 		_afEngaged = true;
 		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
@@ -937,10 +1069,13 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 		}
 
 		if (_afPhase == 1) {
+			NSLog(@"BarcodeScannerZXing af: coarse best pos=%.2f sharp=%.1f (avg %.1f), fine sweep",
+				_afBestPos, _afBestSharp, _afSharpN > 0 ? _afSharpSum / _afSharpN : 0.0);
 			[self afStartSweep:_afBestPos - 0.05f to:_afBestPos + 0.05f step:0.012f phase:2];
 			return;
 		}
 
+		NSLog(@"BarcodeScannerZXing af: locked pos=%.2f sharp=%.1f", _afBestPos, _afBestSharp);
 		_afPhase = 3;
 		_afLockSharp = _afBestSharp;
 		_afLowFrames = 0;
@@ -967,9 +1102,15 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 	if (median > _afLockSharp)
 		_afLockSharp = median;
 
+	// Периодический пульс лока — для полевой диагностики по syslog.
+	if (++_afTick % 60 == 0)
+		NSLog(@"BarcodeScannerZXing af: lock pos=%.2f median=%.1f (peak %.1f)", _afBestPos, median, _afLockSharp);
+
 	if (_afLockSharp >= 4.0 && median < _afLockSharp * 0.35) {
 
 		if (++_afLowFrames >= 15) {
+			NSLog(@"BarcodeScannerZXing af: local refocus around %.2f (median %.1f, peak %.1f)",
+				_afBestPos, median, _afLockSharp);
 			[self afStartSweep:_afBestPos - 0.15f to:_afBestPos + 0.15f step:0.033f phase:1];
 			return;
 		}
@@ -980,8 +1121,10 @@ static double SharpnessOfCenter(const uint8_t* lum, int width, int height)
 
 	// Вся шкала при поиске оказалась мыльной (в центре не было фактуры) — лок
 	// ненадёжен: периодически повторяем полный поиск, пока не появится пик.
-	if (_afLockSharp < 3.0 && ++_afIdleFrames >= 90)
+	if (_afLockSharp < 3.0 && ++_afIdleFrames >= 90) {
+		NSLog(@"BarcodeScannerZXing af: no texture (peak %.1f), full re-sweep", _afLockSharp);
 		[self afStartSweep:0.0f to:1.0f step:0.033f phase:1];
+	}
 }
 
 - (void)stop
