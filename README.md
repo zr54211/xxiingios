@@ -85,8 +85,15 @@ pwsh package/make-zip.ps1
 
 Обе платформы готовы и проверены на устройствах: Android (arm64-v8a,
 armeabi-v7a, x86_64 — полноэкранная Activity со сканером) и iOS (arm64,
-статическая линковка, регистрация через `RegisterLibrary` — см. `ios/README.md`).
-Финальный zip-макет содержит все архитектуры (`package/manifest.xml`).
+статическая линковка, регистрация через `RegisterLibrary`, точки входа
+внутренние — см. `ios/README.md`). Финальный zip-макет содержит все архитектуры
+(`package/manifest.xml`). Версия 0.2.1 — исправлен конфликт с другими ВК
+в одном iOS-приложении.
+
+Встроена в МобильнуюКассу (GitLab `1c_vietnam/develop_software/mobile-cashdesk/mobile-cashdesk`)
+и в конфигурацию BIS (`1c_vietnam/deploying_projects/bis-mart-pos`).
+Ветка `test-contrast-af` — диагностическая сборка iOS-автофокуса для чужих айфонов
+(см. `ios/README.md`), в прод не идёт.
 
 Интеграция в МобильнуюКассу оформлена подсистемой **ZXingScanning**
 (ПоддержкаОборудования → ПодключаемоеОборудование): общий модуль
