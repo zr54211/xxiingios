@@ -2,18 +2,26 @@
 
 #include "BarcodeScannerAddIn.h"
 
-// Сборка идёт с visibility=hidden; точки входа Native API должны остаться
-// видимыми (на Windows это делает exports.def).
-// На iOS ВК статически линкуется в исполняемый файл платформы; рабочий механизм
-// подключения — саморегистрация через RegisterLibrary (см. блок __APPLE__ ниже).
-// weak-атрибут дополнительно кладёт точки входа в export trie исполняемого файла
-// (ld64 помещает туда только weak-определения) — подстраховка, не основной путь.
+// Windows и Android: точки входа Native API — экспортируемые C-функции, загрузчик
+// ищет их по имени в файле библиотеки. Сборка идёт с visibility=hidden, поэтому
+// они помечаются видимыми (на Windows это делает exports.def).
+// iOS: все ВК статически линкуются в один исполняемый файл платформы, и
+// одноимённые глобальные точки входа разных ВК конфликтуют при линковке (чужие
+// сильные символы молча подменяют слабые). Поэтому здесь точки входа внутренние
+// (анонимный namespace), и загрузчик получает их только через таблицу
+// RegisterLibrary (см. блок __APPLE__ ниже) — как в шаблоне templateMobile.
+#if defined(__APPLE__)
+#define BSZ_ENTRY_POINTS_BEGIN namespace {
+#define BSZ_ENTRY_POINTS_END }
+#define BSZ_EXPORT
+#else
+#define BSZ_ENTRY_POINTS_BEGIN extern "C" {
+#define BSZ_ENTRY_POINTS_END }
 #if defined(_WIN32)
 #define BSZ_EXPORT
-#elif defined(__APPLE__)
-#define BSZ_EXPORT __attribute__((visibility("default"), weak))
 #else
 #define BSZ_EXPORT __attribute__((visibility("default")))
+#endif
 #endif
 
 namespace {
@@ -25,12 +33,14 @@ constexpr WCHAR_T kClassNames[] = {
 
 } // namespace
 
-extern "C" BSZ_EXPORT const WCHAR_T* GetClassNames()
+BSZ_ENTRY_POINTS_BEGIN
+
+BSZ_EXPORT const WCHAR_T* GetClassNames()
 {
 	return kClassNames;
 }
 
-extern "C" BSZ_EXPORT long GetClassObject(const WCHAR_T* /*className*/, IComponentBase** pIntf)
+BSZ_EXPORT long GetClassObject(const WCHAR_T* /*className*/, IComponentBase** pIntf)
 {
 	// Компонента экспортирует единственный класс — имя не анализируем.
 	if (!pIntf || *pIntf)
@@ -40,7 +50,7 @@ extern "C" BSZ_EXPORT long GetClassObject(const WCHAR_T* /*className*/, ICompone
 	return 1;
 }
 
-extern "C" BSZ_EXPORT long DestroyObject(IComponentBase** pIntf)
+BSZ_EXPORT long DestroyObject(IComponentBase** pIntf)
 {
 	if (!pIntf || !*pIntf)
 		return -1;
@@ -50,10 +60,12 @@ extern "C" BSZ_EXPORT long DestroyObject(IComponentBase** pIntf)
 	return 0;
 }
 
-extern "C" BSZ_EXPORT AppCapabilities SetPlatformCapabilities(const AppCapabilities /*capabilities*/)
+BSZ_EXPORT AppCapabilities SetPlatformCapabilities(const AppCapabilities /*capabilities*/)
 {
 	return eAppCapabilitiesLast;
 }
+
+BSZ_ENTRY_POINTS_END
 
 #if defined(__APPLE__)
 
@@ -62,6 +74,7 @@ extern "C" BSZ_EXPORT AppCapabilities SetPlatformCapabilities(const AppCapabilit
 // приложения (шаблон templateMobile комплекта «Технология создания внешних
 // компонент», include/mobile.h). Ключ сопоставления с макетом документирован
 // скупо — регистрируем все разумные варианты имени, реестр это допускает.
+// Имена в таблице разрешаются в точки входа из анонимного namespace выше.
 extern "C" void RegisterLibrary(const char* name, const void* reserved, const void* exportTable);
 
 namespace {

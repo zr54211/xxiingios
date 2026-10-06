@@ -47,7 +47,13 @@ jobs:
       - name: Verify arch and Native API exports
         run: |
           lipo -info build-ios/libBarcodeScannerZXing.a
-          nm -gU build-ios/libBarcodeScannerZXing.a | grep -E "GetClassNames|GetClassObject|DestroyObject|SetPlatformCapabilities"
+          # Точки входа на iOS внутренние: глобальных быть не должно (иначе
+          # конфликт с одноимёнными символами других ВК в исполняемом файле),
+          # подключение идёт только через RegisterLibrary.
+          if nm -gU build-ios/libBarcodeScannerZXing.a | grep -E "_(GetClassNames|GetClassObject|DestroyObject|SetPlatformCapabilities)$"; then
+            echo "Native API entry points must not be global on iOS"; exit 1
+          fi
+          nm -u build-ios/libBarcodeScannerZXing.a | grep -q "_RegisterLibrary$"
           ls -la build-ios/libBarcodeScannerZXing.a
 
       - uses: actions/upload-artifact@v4
